@@ -19,6 +19,8 @@ import threading
 import math
 import sys # Font hata ayıklaması için sys
 import traceback # Detaylı hata izi için
+import io
+import csv
 
 # --- Yapılandırma ve Sabitler ---
 
@@ -107,7 +109,7 @@ def get_base_styles():
     styles = getSampleStyleSheet()
     # Kaydedilen font adını kullan
     styles['Title'].fontName = registered_font_name
-    styles['Heading1'].fontName = registered_font_name
+    styles['Heading1'].fontName = registered_bold_font_name
     styles['Heading2'].fontName = registered_font_name
     styles['Normal'].fontName = registered_font_name
     styles['Italic'].fontName = registered_font_name
@@ -117,6 +119,7 @@ def get_base_styles():
     # Başlık stilini biraz küçült
     styles['h1'].fontSize = 16
     styles['h1'].leading = 20
+    styles['h1'].fontName = registered_bold_font_name
     styles['h3'].fontSize = 10
     styles['h3'].leading = 12
 
@@ -272,6 +275,111 @@ def draw_background(canvas, doc, background_type, background_value):
             canvas.drawCentredString(doc.pagesize[0]/2, doc.pagesize[1]/2, f"Arka plan resmi yüklenemedi: {os.path.basename(background_value)}")
 
     canvas.restoreState()
+
+# --- Yapıştırma Modu Yardımcıları ---
+
+PASTE_JOIN_CANDIDATES = [
+    'dosya no', 'dosyano', 'dosya_no', 'dosya-numarası', 'dosya numarası',
+    'soruşturma no', 'soruşturma numarası', 'sorusturma no', 'sorusturma numarasi',
+    'sorusturma_numarasi', 'soruşturma_numarası', 'no', 'numara'
+]
+
+def detect_delimiter(sample_text: str) -> str:
+    """Basit sezgisel: ilk satırda en çok hangi ayırıcı varsa onu kullan."""
+    header = sample_text.splitlines()[0] if sample_text else ''
+    counts = {
+        '\t': header.count('\t'),
+        ';': header.count(';'),
+        ',': header.count(','),
+        '|': header.count('|'),
+    }
+    # Excel'den kopyalama genelde tab \t olur
+    # Eşitlik durumunda \t > ; > , > |
+    ordered = sorted(counts.items(), key=lambda kv: (kv[1], {'\t':3, ';':2, ',':1, '|':0}[kv[0]]), reverse=True)
+    best = ordered[0][0] if ordered else '\t'
+    return best if counts[best] > 0 else ('\t' if '\t' in header else (',' if ',' in header else (';' if ';' in header else '\t')))
+
+def parse_pasted_text_to_dataframe(text: str) -> pd.DataFrame:
+    """Excel'den yapıştırılmış metni DataFrame'e çevirir. İlk satır başlık kabul edilir."""
+    if not text or not text.strip():
+        raise ValueError("Yapıştırılan veri boş.")
+    delim = detect_delimiter(text)
+    reader = csv.reader(io.StringIO(text.strip()), delimiter=delim)
+    rows = [row for row in reader if any(cell.strip() for cell in row)]
+    if not rows:
+        raise ValueError("Yapıştırılan metinden satır okunamadı.")
+    header = [h.strip() for h in rows[0]]
+    # Başlıkta boş isimler varsa sütun adlarını üret
+    header = [col if col else f"Kolon_{i+1}" for i, col in enumerate(header)]
+    data = rows[1:]
+    # Satırlarda sütun sayısı başlıktan kısa ise doldur
+    fixed_rows = [r + ['']*(len(header)-len(r)) if len(r) < len(header) else r[:len(header)] for r in data]
+    df = pd.DataFrame(fixed_rows, columns=header)
+    return df
+
+def normalize_column_name(name: str) -> str:
+    s = str(name).strip().lower()
+    # Türkçe karakter sadeleştirme
+    translations = str.maketrans({
+        'ı':'i', 'İ':'i', 'ş':'s', 'Ş':'s', 'ğ':'g', 'Ğ':'g', 'ü':'u', 'Ü':'u', 'ö':'o', 'Ö':'o', 'ç':'c', 'Ç':'c'
+    })
+    s = s.translate(translations)
+    s = s.replace('-', ' ').replace('_', ' ')
+    s = ' '.join(s.split())
+    return s
+
+def detect_investigation_column(columns) -> str | None:
+    """Sütun adlarından soruşturma/dosya numarası sütununu tespit eder."""
+    norm_map = {col: normalize_column_name(col) for col in columns}
+    # Öncelik: 'dosya no'
+    for orig, norm in norm_map.items():
+        if norm in ('dosya no', 'dosya numarasi'):
+            return orig
+    # Diğer adaylar
+    for candidate in PASTE_JOIN_CANDIDATES:
+        for orig, norm in norm_map.items():
+            if candidate == norm:
+                return orig
+    # İçeriyorsa (ör. 'dosya no (eski)')
+    for candidate in ('dosya', 'sorusturma', 'sorusturma no', 'sorusturma numarasi'):
+        for orig, norm in norm_map.items():
+            if candidate in norm:
+                return orig
+    return None
+
+def preprocess_join_column(df: pd.DataFrame, join_col: str) -> pd.Series:
+    """Birleştirme sütunu değerlerini normalize eder: strip, uppercase-insensitive, gereksiz boşlukları siler."""
+    s = df[join_col].astype(str).str.strip()
+    # Sık görülen biçim: '2024/12345' gibi. Boşlukları temizle, çoklu boşlukları tek yap.
+    s = s.str.replace('\u00A0', ' ', regex=False).str.replace('\s+', ' ', regex=True)
+    return s
+
+def intersection_by_column(df1: pd.DataFrame, df2: pd.DataFrame, join_col: str) -> pd.DataFrame:
+    """İki DataFrame arasında join_col'a göre kesişim listesini döndürür (benzersiz)."""
+    if join_col not in df1.columns or join_col not in df2.columns:
+        raise KeyError(f"Birleştirme sütunu bulunamadı: {join_col}")
+    s1 = preprocess_join_column(df1, join_col)
+    s2 = preprocess_join_column(df2, join_col)
+    # Benzersiz kümeler
+    set1 = pd.Series(s1.unique()).dropna()
+    set2 = pd.Series(s2.unique()).dropna()
+    common = pd.Series(sorted(set(set1) & set(set2)))
+    result = pd.DataFrame({join_col: common})
+    # Sıralamayı mevcut mantığa benzet: 'Yıl/No'
+    try:
+        split_data = result[join_col].astype(str).str.split('/', n=1, expand=True)
+        result['_Yil'] = pd.to_numeric(split_data[0].str.strip(), errors='coerce')
+        if split_data.shape[1] > 1:
+            num_part = split_data[1].astype(str).str.replace(r'[^\d]', '', regex=True)
+            result['_No'] = pd.to_numeric(num_part, errors='coerce')
+        else:
+            result['_No'] = pd.NA
+        result = result.sort_values(by=['_Yil', '_No'], na_position='last').reset_index(drop=True)
+        result = result.drop(columns=['_Yil', '_No'])
+    except Exception:
+        pass
+    result.insert(0, 'Sıra No', range(1, len(result) + 1))
+    return result
 
 # --- Temel Mantık Fonksiyonları ---
 
@@ -448,7 +556,7 @@ def process_files(file1_path, file2_path, columns_to_use, column_rename_map, log
     log_callback("Veri işleme tamamlandı.")
     return final_df
 
-def build_pdf_report(output_pdf_path, dataframe, file1_name, file2_name, page_orientation, background_info, margins_cm, log_callback):
+def build_pdf_report(output_pdf_path, dataframe, file1_name, file2_name, page_orientation, background_info, margins_cm, log_callback, comparison_columns=None):
     """İşlenmiş verilerle PDF dokümanını oluşturur."""
     styles = get_base_styles()
 
@@ -519,7 +627,8 @@ def build_pdf_report(output_pdf_path, dataframe, file1_name, file2_name, page_or
 
     # Not Bölümü (Tablodan sonra yeni sayfaya geçilirse not altta kalır, bu genelde istenen durumdur)
     elements.append(Spacer(1, 0.5*cm))
-    note_text = f"<b>Not:</b> Bu tablo, <u>{os.path.basename(file1_name)}.xlsx</u> ve <u>{os.path.basename(file2_name)}.xlsx</u> dosyalarında bulunan ortak kayıtları göstermektedir. Karşılaştırma {', '.join(BASE_COLUMNS)} sütunlarına göre yapılmıştır."
+    used_cols = comparison_columns if comparison_columns else BASE_COLUMNS
+    note_text = f"<b>Not:</b> Bu tablo, <u>{os.path.basename(file1_name)}.xlsx</u> ve <u>{os.path.basename(file2_name)}.xlsx</u> dosyalarında bulunan ortak kayıtları göstermektedir. Karşılaştırma {', '.join(used_cols)} sütunlarına göre yapılmıştır."
     elements.append(Paragraph(note_text, styles['Normal']))
 
     # PDF Oluştur
@@ -581,10 +690,9 @@ class ComparisonApp:
         options_frame = ttk.LabelFrame(self.root, text="Ayarlar", padding="10")
         options_frame.pack(fill=tk.X, expand=False, padx=10, pady=5) # Ayarlar sabit boyutta kalsın, genişlesin
 
-        # Klasör seçimi ve başlat butonu çerçevesi
-        # Input folder seçimi kaldırıldı
+        # Klasör seçimi ve sekmeler çerçevesi
         control_frame = ttk.Frame(self.root, padding="10")
-        control_frame.pack(fill=tk.X, expand=False)
+        control_frame.pack(fill=tk.BOTH, expand=False)
 
         # Durum ve bilgi çerçevesi
         status_frame = ttk.Frame(self.root, padding="10")
@@ -643,15 +751,48 @@ class ComparisonApp:
 
 
         # --- control_frame içeriği ---
-        # Giriş Klasörü seçimi kaldırıldı
+        control_frame.columnconfigure(1, weight=1)
+        ttk.Label(control_frame, text="PDF'lerin Kaydedileceği Klasör:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(control_frame, textvariable=self.output_folder, width=50).grid(row=0, column=1, sticky=tk.EW, padx=5, pady=5)
+        ttk.Button(control_frame, text="Gözat...", command=self.select_output_folder).grid(row=0, column=2, padx=5, pady=5)
 
-        ttk.Label(control_frame, text="PDF'lerin Kaydedileceği Klasör:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5) # Satır 0 oldu
-        ttk.Entry(control_frame, textvariable=self.output_folder, width=50).grid(row=0, column=1, sticky=tk.EW, padx=5, pady=5) # Satır 0 oldu
-        ttk.Button(control_frame, text="Gözat...", command=self.select_output_folder).grid(row=0, column=2, padx=5, pady=5) # Satır 0 oldu
+        # Sekmeler: Dosyadan ve Yapıştırarak
+        notebook = ttk.Notebook(control_frame)
+        notebook.grid(row=1, column=0, columnspan=3, sticky="nsew")
 
-        # Eylem Düğmesi - Şimdi Dosya Seçme Diyaloğunu Açacak
-        self.run_button = ttk.Button(control_frame, text="Excel Dosyalarını Seç ve Karşılaştırmayı Başlat", command=self.select_files_and_start)
-        self.run_button.grid(row=1, column=0, columnspan=3, pady=15) # Satır 1 oldu
+        file_tab = ttk.Frame(notebook)
+        paste_tab = ttk.Frame(notebook)
+        notebook.add(file_tab, text="Dosyadan")
+        notebook.add(paste_tab, text="Yapıştırarak")
+
+        # Dosyadan tab: yalnızca başlat butonu
+        self.run_button = ttk.Button(file_tab, text="Excel Dosyalarını Seç ve Karşılaştırmayı Başlat", command=self.select_files_and_start)
+        self.run_button.pack(padx=5, pady=10, anchor=tk.W)
+
+        # Yapıştırarak tab: iki metin alanı ve buton
+        paste_inner = ttk.Frame(paste_tab)
+        paste_inner.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        paste_inner.columnconfigure(0, weight=1)
+        paste_inner.columnconfigure(1, weight=1)
+        paste_inner.rowconfigure(1, weight=1)
+
+        ttk.Label(paste_inner, text="1. Excel'den Kopyala ve Yapıştır:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(paste_inner, text="2. Excel'den Kopyala ve Yapıştır:").grid(row=0, column=1, sticky=tk.W)
+
+        self.paste_text1 = tk.Text(paste_inner, height=12, wrap=tk.NONE)
+        self.paste_text2 = tk.Text(paste_inner, height=12, wrap=tk.NONE)
+        yscroll1 = ttk.Scrollbar(paste_inner, orient=tk.VERTICAL, command=self.paste_text1.yview)
+        yscroll2 = ttk.Scrollbar(paste_inner, orient=tk.VERTICAL, command=self.paste_text2.yview)
+        self.paste_text1.configure(yscrollcommand=yscroll1.set)
+        self.paste_text2.configure(yscrollcommand=yscroll2.set)
+
+        self.paste_text1.grid(row=1, column=0, sticky="nsew")
+        yscroll1.grid(row=1, column=0, sticky="nse")
+        self.paste_text2.grid(row=1, column=1, sticky="nsew")
+        yscroll2.grid(row=1, column=1, sticky="nse")
+
+        self.run_paste_button = ttk.Button(paste_inner, text="Yapıştırılan Verilerle Karşılaştırmayı Başlat", command=self.start_paste_mode)
+        self.run_paste_button.grid(row=2, column=0, columnspan=2, pady=10, sticky=tk.W)
 
 
         # --- status_frame içeriği ---
@@ -675,6 +816,7 @@ class ComparisonApp:
 
         # Başlangıçta arka plan giriş alanının durumunu güncelle
         self.update_bg_input_state()
+        self.is_processing = False
 
 
     def log_status(self, message):
@@ -780,6 +922,9 @@ class ComparisonApp:
 
     def select_files_and_start(self):
         """Dosya seçme diyaloğunu açar ve seçilen dosyalarla işlemi başlatır."""
+        if self.is_processing:
+            messagebox.showwarning("Devam Eden İşlem", "Bir işlem zaten devam ediyor. Lütfen bitmesini bekleyin.")
+            return
         # Dosya seçme diyaloğu için başlangıç dizini olarak mevcut çalışma dizinini kullan
         initial_dir = os.getcwd()
 
@@ -836,6 +981,8 @@ class ComparisonApp:
 
         # GUI elementlerini devre dışı bırak
         self.run_button.config(state=tk.DISABLED, text="İşlem Başlatılıyor...")
+        self.run_paste_button.config(state=tk.DISABLED)
+        self.is_processing = True
         self.status_text.config(state=tk.NORMAL)
         self.status_text.delete('1.0', tk.END) # Önceki logları temizle
         self.status_text.config(state=tk.DISABLED)
@@ -900,7 +1047,8 @@ class ComparisonApp:
                         page_orientation,
                         background_info,
                         margins_cm,
-                        self.log_status # log_callback'i pass et
+                        self.log_status, # log_callback'i pass et
+                        comparison_columns=BASE_COLUMNS
                     )
                     if pdf_success:
                         success_count += 1
@@ -946,6 +1094,135 @@ class ComparisonApp:
     def enable_run_button(self):
         """Ana iş parçacığından çalıştırma düğmesini güvenli bir şekilde yeniden etkinleştirir."""
         self.run_button.config(state=tk.NORMAL, text="Excel Dosyalarını Seç ve Karşılaştırmayı Başlat")
+        self.run_paste_button.config(state=tk.NORMAL, text="Yapıştırılan Verilerle Karşılaştırmayı Başlat")
+        self.is_processing = False
+
+    def start_paste_mode(self):
+        """Yapıştırılan iki metni okuyup kesişimi hesaplayan işlemi başlatır."""
+        if self.is_processing:
+            messagebox.showwarning("Devam Eden İşlem", "Bir işlem zaten devam ediyor. Lütfen bitmesini bekleyin.")
+            return
+
+        text1 = self.paste_text1.get('1.0', tk.END)
+        text2 = self.paste_text2.get('1.0', tk.END)
+
+        if not text1.strip() or not text2.strip():
+            messagebox.showwarning("Eksik Veri", "Her iki alana da Excel'den verileri yapıştırın.")
+            return
+
+        # Kenar boşluklarını al ve doğrula
+        try:
+            margins_cm = {
+                "left": self.left_margin.get(),
+                "right": self.right_margin.get(),
+                "top": self.top_margin.get(),
+                "bottom": self.bottom_margin.get(),
+            }
+            if any(m < 0 for m in margins_cm.values()):
+                messagebox.showerror("Hata", "Kenar boşlukları negatif olamaz.")
+                return
+        except tk.TclError:
+            messagebox.showerror("Hata", "Kenar boşluğu değerleri sayı olmalıdır.")
+            return
+
+        out_folder = self.output_folder.get()
+        if not os.path.isdir(out_folder):
+            try:
+                os.makedirs(out_folder, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Hata", f"Çıkış klasörü oluşturulamadı:\n{out_folder}\n{e}")
+                return
+
+        self.run_button.config(state=tk.DISABLED)
+        self.run_paste_button.config(state=tk.DISABLED, text="İşlem Başlatılıyor...")
+        self.status_text.config(state=tk.NORMAL)
+        self.status_text.delete('1.0', tk.END)
+        self.status_text.config(state=tk.DISABLED)
+        self.update_info_labels("Hazırlanıyor...", "N/A")
+        self.log_status("Yapıştırılan verilerle işlem başlatılıyor...")
+        self.is_processing = True
+
+        bg_info = {
+            "type": self.background_type.get(),
+            "value": self.background_value.get() if self.background_type.get() != "None" else None,
+        }
+
+        thread = threading.Thread(
+            target=self.run_paste_comparison,
+            args=(text1, text2, out_folder, self.page_orientation.get(), bg_info, margins_cm),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_paste_comparison(self, text1: str, text2: str, output_dir: str, page_orientation: str, background_info: dict, margins_cm: dict):
+        """Yapıştırılan metinlerden DataFrame üretir, 'Dosya No' tespit eder ve PDF oluşturur."""
+        try:
+            self.log_status("Yapıştırılan veriler parse ediliyor...")
+            try:
+                df1 = parse_pasted_text_to_dataframe(text1)
+                df2 = parse_pasted_text_to_dataframe(text2)
+            except Exception as e:
+                self.log_status(f"Hata: Yapıştırılan metin parse edilemedi: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Veri Hatası", f"Yapıştırılan veriler okunamadı:\n{e}"))
+                return
+
+            join_col1 = detect_investigation_column(df1.columns)
+            join_col2 = detect_investigation_column(df2.columns)
+            if not join_col1 or not join_col2:
+                self.log_status("Hata: Soruşturma/Dosya numarası sütunu tespit edilemedi.")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Sütun Bulunamadı",
+                    "Soruşturma/Dosya numarası sütunu tespit edilemedi. Lütfen sütun başlığının 'Dosya No' gibi anlaşılır olduğundan emin olun."
+                ))
+                return
+
+            # Eğer sütun adları farklıysa, ikinci DF'de adını birinciye eşle
+            if join_col2 != join_col1:
+                df2 = df2.rename(columns={join_col2: join_col1})
+                join_col = join_col1
+            else:
+                join_col = join_col1
+
+            self.log_status(f"Birleştirme sütunu: {join_col}")
+
+            # Kesişim DataFrame'i
+            result_df = intersection_by_column(df1, df2, join_col)
+            if result_df.empty:
+                self.root.after(0, self.update_info_labels, "Yapıştırılan Veriler", "0 (Atlandı)")
+                self.log_status("Bilgi: Kesişim bulunamadı. PDF oluşturulmayacak.")
+            else:
+                self.root.after(0, self.update_info_labels, "Yapıştırılan Veriler", len(result_df))
+                self.log_status(f"Ortak kayıt bulundu: {len(result_df)}. PDF oluşturuluyor...")
+
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                pdf_name = f"PastedA_vs_PastedB_{timestamp}.pdf"
+                output_pdf_path = os.path.join(output_dir, pdf_name)
+
+                ok = build_pdf_report(
+                    output_pdf_path,
+                    result_df,
+                    "PastedA",
+                    "PastedB",
+                    page_orientation,
+                    background_info,
+                    margins_cm,
+                    self.log_status,
+                    comparison_columns=[join_col],
+                )
+                if ok:
+                    self.log_status(f"BAŞARILI: PDF oluşturuldu -> {output_pdf_path}")
+                else:
+                    self.log_status("Hata: PDF oluşturulamadı.")
+
+            self.root.after(0, lambda: messagebox.showinfo("İşlem Tamamlandı", "Yapıştırarak karşılaştırma tamamlandı."))
+
+        except Exception as e:
+            self.log_status(f"BEKLENMEDİK KRİTİK HATA OLUŞTU (Paste): {e}")
+            self.log_status(traceback.format_exc())
+            self.root.after(0, lambda: messagebox.showerror("Kritik Hata", f"İşlem sırasında beklenmedik bir hata oluştu:\n{e}"))
+        finally:
+            self.root.after(0, self.enable_run_button)
+            self.root.after(0, self.update_info_labels, "Bekleniyor...", "N/A")
 
 
 # --- Ana Çalıştırma ---
