@@ -1,1232 +1,719 @@
-import glob
 import pandas as pd
-import os
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak, Spacer, Image
-)
+from tkinter import ttk, messagebox, scrolledtext, filedialog
+from datetime import datetime
+import io
+import traceback
+import numpy as np
+import os
+import tempfile
+import subprocess
+import platform
+
+# --- REPORTLAB IMPORTLARI ---
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter, A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch, cm
+from reportlab.lib.pagesizes import landscape, portrait, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
-from datetime import datetime
-from itertools import combinations
-import locale
-import threading
-import math
-import sys # Font hata ayıklaması için sys
-import traceback # Detaylı hata izi için
-import io
-import csv
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
-# --- Yapılandırma ve Sabitler ---
+# --- PANDAS AYARLARI ---
+pd.set_option('future.no_silent_downcasting', True)
 
-# Türkçe yerel ayarları (locale) belirlemeye çalışıyoruz, eğer başarısız olursa varsayılan ayar kullanılır
-try:
-    # Önce UTF-8 deneyelim
-    locale.setlocale(locale.LC_ALL, 'tr_TR.UTF-8')
-except locale.Error:
-    try:
-        # Eğer UTF-8 desteklenmiyorsa, sadece tr_TR deneyelim
-        locale.setlocale(locale.LC_ALL, 'tr_TR')
-    except locale.Error:
-        print("Uyarı: 'tr_TR.UTF-8' veya 'tr_TR' yerel ayarı bulunamadı. Varsayılan yerel ayar kullanılıyor.")
-        # Sistem varsayılanını kullanmak için aşağıdaki satır etkinleştirilebilir:
-        # locale.setlocale(locale.LC_ALL, '')
-
-
-# Font Kayıt İşlemi
+# --- FONT AYARLARI ---
 FONT_NAME = 'DejaVuSans'
-# Font dosyalarının bulunduğu varsayılan konumları kontrol et
-# Programın çalıştığı dizin veya fontlar alt dizini olabilir
-# Daha robust bir yol: programın kendi .py dosyasının olduğu dizini kullan
-program_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-FONT_PATH = os.path.join(program_dir, "DejaVuSans.ttf")
-FONT_BOLD_PATH = os.path.join(program_dir, "DejaVuSans-Bold.ttf")
-
-# Eğer program dizininde yoksa, belki mevcut çalışma dizinindedir?
-if not os.path.exists(FONT_PATH):
-    FONT_PATH = "DejaVuSans.ttf"
-if not os.path.exists(FONT_BOLD_PATH):
-    FONT_BOLD_PATH = "DejaVuSans-Bold.ttf"
-
-
-registered_font_name = 'Helvetica' # Varsayılan olarak Helvetica başla
-registered_bold_font_name = 'Helvetica-Bold'
+FONT_BOLD_NAME = 'DejaVuSans-Bold'
 
 try:
-    # Normal fontu kaydet
-    if os.path.exists(FONT_PATH):
-        pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
-        registered_font_name = FONT_NAME
-        print(f"Font '{FONT_NAME}' '{FONT_PATH}' yolundan kaydedildi.")
+    if os.path.exists("DejaVuSans.ttf"):
+        pdfmetrics.registerFont(TTFont(FONT_NAME, "DejaVuSans.ttf"))
+        font_regular = FONT_NAME
     else:
-        print(f"Uyarı: Font dosyası bulunamadı: '{FONT_PATH}'. Varsayılan Helvetica kullanılıyor.")
+        font_regular = "Helvetica"
 
-    # Kalın fontu kaydet
-    if os.path.exists(FONT_BOLD_PATH):
-        pdfmetrics.registerFont(TTFont(FONT_NAME + '-Bold', FONT_BOLD_PATH))
-        # Sadece normal font kaydedildiyse kalın font adına normal font adını ata (Fallback)
-        registered_bold_font_name = FONT_NAME + '-Bold' if registered_font_name == FONT_NAME else 'Helvetica-Bold'
-        print(f"Kalın Font '{FONT_NAME}-Bold' '{FONT_BOLD_PATH}' yolundan kaydedildi.")
-
+    if os.path.exists("DejaVuSans-Bold.ttf"):
+        pdfmetrics.registerFont(TTFont(FONT_BOLD_NAME, "DejaVuSans-Bold.ttf"))
+        font_bold = FONT_BOLD_NAME
     else:
-         print(f"Uyarı: Kalın font dosyası bulunamadı: '{FONT_BOLD_PATH}'. Varsayılan Helvetica-Bold kullanılıyor.")
-         registered_bold_font_name = 'Helvetica-Bold' # Varsayılan kalın fontu kullan
+        font_bold = "Helvetica-Bold"
+except Exception:
+    font_regular = "Helvetica"
+    font_bold = "Helvetica-Bold"
 
-except Exception as e:
-    print(f"Font kaydı sırasında kritik hata: {e}")
-    print("Varsayılan Helvetica ve Helvetica-Bold fontları kullanılacak.")
-    registered_font_name = 'Helvetica'
-    registered_bold_font_name = 'Helvetica-Bold'
+# --- SABİTLER ---
 
-
-# Excel'den okunacak ve birleştirme için kullanılacak sütunlar
-BASE_COLUMNS = ["Birim Adı", "Dosya No", "Dosya Durumu", "Dosya Türü"]
-
-# Raporda kullanılacak geçerli dosya türleri
-VALID_DOSYA_TURU = ["Soruşturma Dosyası", "Ceza Dava Dosyası", "CBS İhbar Dosyası"]
-
-# Kısaltma için metin değişim kuralları
-REPLACEMENTS = {
-    "Birim Adı": {"Cumhuriyet Başsavcılığı": "CBS"},
-    "Dosya Türü": {"CBS Sorusturma Dosyası": "Soruşturma Dosyası"} # Bu kural artık gerekli olmayabilir ama dursun
-}
-
-# Varsayılan sütun adı değiştirme haritası (GUI üzerinden değiştirilebilir)
-DEFAULT_COLUMN_RENAME_MAP = {"Dosya Durumu": "Derdest"}
-
-# Varsayılan Kenar Boşlukları (cm cinsinden)
-DEFAULT_MARGIN_CM = 1.5
-
-# --- Stil Fonksiyonları ---
-
-def get_base_styles():
-    """Temel ReportLab stillerini alır ve varsayılan fontu ayarlar."""
-    styles = getSampleStyleSheet()
-    # Kaydedilen font adını kullan
-    styles['Title'].fontName = registered_font_name
-    styles['Heading1'].fontName = registered_bold_font_name
-    styles['Heading2'].fontName = registered_font_name
-    styles['Normal'].fontName = registered_font_name
-    styles['Italic'].fontName = registered_font_name
-    styles['BodyText'].fontName = registered_font_name
-    styles['BodyText'].leading = 14  # Satır aralığını artır
-    styles['Normal'].leading = 14
-    # Başlık stilini biraz küçült
-    styles['h1'].fontSize = 16
-    styles['h1'].leading = 20
-    styles['h1'].fontName = registered_bold_font_name
-    styles['h3'].fontSize = 10
-    styles['h3'].leading = 12
-
-    return styles
-
-def create_table_style(num_rows):
-    """Modern görünümlü bir tablo stili oluşturur."""
-    # Kaydedilen kalın font adını kullan
-    bold_font = registered_bold_font_name
-
-    style = TableStyle([
-        # Başlık Stili
-        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
-        ('FONTNAME', (0, 0), (-1, 0), bold_font),  # Başlık için kalın font
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
-
-        # Genel Gövde Stili
-        ('FONTNAME', (0, 1), (-1, -1), registered_font_name), # Veri için normal font
-        ('FONTSIZE', (0, 1), (-1, -1), 9), # Veri font boyutunu biraz küçült
-        ('TEXTCOLOR', (0, 1), (-1, -1), colors.darkslategray),
-        ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 1), (-1, -1), 'MIDDLE'),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 4), # Satır padding'i azalt
-        ('TOPPADDING', (0, 1), (-1, -1), 4),
-
-        # Izgara ve Alternatif Satır Renkleri
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.aliceblue, colors.whitesmoke])
-    ])
-    return style
-
-def calculate_column_widths(dataframe, page_width, min_col_width=1*cm, max_col_width=8*cm, base_char_width=2.5):
-    """
-    İçeriğe ve sayfa genişliğine göre dinamik sütun genişlikleri hesaplar.
-    Args:
-        dataframe: Sütun genişlikleri hesaplanacak pandas DataFrame.
-        page_width: Sayfada kullanılabilir genişlik (örneğin, doc.width).
-        min_col_width: Minimum sütun genişliği.
-        max_col_width: Maksimum sütun genişliği.
-        base_char_width: Karakter başına tahmini genişlik (font ve boyuta göre ayarlanabilir).
-    Returns:
-        Sütun genişliklerinin bir listesi (nokta cinsinden).
-    """
-    widths = []
-    total_max_len = 0
-    max_lengths = []
-
-    # Her sütun için maksimum uzunluğu hesapla (başlık + veri)
-    for column in dataframe.columns:
-        header_len = len(str(column))
-        try:
-            # Veri tipleri farklı olabileceğinden string'e çevirip uzunluğu al
-            max_data_len = dataframe[column].astype(str).map(len).max()
-            if pd.isna(max_data_len): max_data_len = 0
-        except Exception:
-            max_data_len = 0
-        # Başlık ve veri uzunluğunun maksimumunu al, biraz boşluk ekle (+2)
-        current_max = max(header_len, int(max_data_len)) + 2
-        max_lengths.append(current_max)
-        total_max_len += current_max
-
-    # Maksimum uzunluk oranına göre genişlikleri hesapla, min/max sınırlarını koru
-    available_width = page_width
-    # Tahmini toplam genişlik (piksel/nokta cinsinden)
-    estimated_total_content_width = total_max_len * base_char_width
-
-    # Oranlama faktörü: Mevcut genişliği tahmini içerik genişliğine oranla
-    # Eğer tahmini içerik genişliği sıfırsa veya negatifse (olmamalı ama önlem), 1 kullan
-    # ÖNCEKİ HATA DÜZELTİLDİ: estimated_total_content_content_width -> estimated_total_content_width
-    scale_factor = available_width / estimated_total_content_width if estimated_total_content_width > 0 else 1
-
-    for max_len in max_lengths:
-        # Oranlanmış genişliği hesapla
-        calculated_width = max_len * base_char_width * scale_factor
-        # Minimum ve maksimum genişlik sınırlarını uygula
-        final_width = max(min_col_width, min(calculated_width, max_col_width))
-        widths.append(final_width)
-
-    # Toplam hesaplanan genişliği kontrol et ve gerekirse ayarlama yap
-    # Bu adım, yuvarlamalar veya min/max sınırları nedeniyle toplamın page_width'ten sapmasını düzeltir.
-    total_calculated_width = sum(widths)
-    if total_calculated_width > 0 and page_width > 0:
-        # Tam genişliği kullanmaya çalış
-        target_width = page_width * 1.0
-
-        # Eğer toplam hesaplanan genişlik hedef genişlikten farklıysa ayar yap
-        if abs(total_calculated_width - target_width) > 1.0: # Küçük sapmaları görmezden gel
-             adjustment_factor = target_width / total_calculated_width
-             widths = [w * adjustment_factor for w in widths]
-             # Ayarlamadan sonra yine min/max sınırlarını kontrol et (önemli!)
-             widths = [max(min_col_width, min(w, max_col_width)) for w in widths]
-
-    # print(f"Sayfa Genişliği: {page_width:.2f}, Hesaplanan Toplam Genişlik: {sum(widths):.2f}")
-
-    return widths
-
-
-# --- Arka Plan/Filigran Fonksiyonu ---
-
-def draw_background(canvas, doc, background_type, background_value):
-    """Sayfada filigran metni veya arka plan resmi çizer."""
-    if not background_type or background_type == "None":
-        return
-
-    canvas.saveState()
-    # canvas.setFont('Helvetica', 1) # Burası gereksiz gibi, aşağıdaki setFont kullanılacak
-
-    if background_type == "Watermark Text" and background_value:
-        # Filigran için fontu büyük ayarla
-        canvas.setFont(registered_font_name, 60)
-        canvas.setFillGray(0.85) # Çok açık gri
-        # Sayfayı ortala ve döndür
-        page_width, page_height = doc.pagesize
-        canvas.translate(page_width/2.0, page_height/2.0)
-        canvas.rotate(45)
-        # Türkçe karakterler için encode etmek gerekebilir, ama TTFont kullandıysak
-        # genellikle gerekmez. Yine de problem olursa burada düzenleme yapılabilir.
-        try:
-             canvas.drawCentredString(0, 0, background_value) # Döndürülmüş ve ortalanmış sayfada (0,0) sayfanın merkezidir
-        except Exception as e:
-             print(f"Filigran metni çizilirken hata: {e}. ASCII olmayan karakterler olabilir mi?")
-             # Hata durumunda en azından bir placeholder çizelim
-             canvas.setFont("Helvetica", 30)
-             canvas.drawCentredString(0, 0, "Metin Hatası")
-
-
-    elif background_type == "Background Image" and background_value and os.path.exists(background_value):
-        try:
-            img_width, img_height = doc.pagesize
-            # Resmin kenar boşluklarını hesaba katarak çizim alanını belirle
-            drawable_width = img_width - doc.leftMargin - doc.rightMargin
-            drawable_height = img_height - doc.topMargin - doc.bottomMargin
-
-            # Resmi çiz
-            canvas.drawImage(
-                background_value,
-                doc.leftMargin, doc.bottomMargin, # Resmin sol alt köşesi
-                width=drawable_width, # Yatayda kullanılabilir alan
-                height=drawable_height, # Dikeyde kullanılabilir alan
-                preserveAspectRatio=True,
-                anchor='c' # Merkeze hizala
-            )
-        except Exception as e:
-            print(f"Arka plan resmi çizilirken hata: '{background_value}': {e}")
-            canvas.setFillColor(colors.red)
-            canvas.setFont("Helvetica", 12)
-            # Hata mesajını sayfanın ortasına çiz
-            canvas.drawCentredString(doc.pagesize[0]/2, doc.pagesize[1]/2, f"Arka plan resmi yüklenemedi: {os.path.basename(background_value)}")
-
-    canvas.restoreState()
-
-# --- Yapıştırma Modu Yardımcıları ---
-
-PASTE_JOIN_CANDIDATES = [
-    'dosya no', 'dosyano', 'dosya_no', 'dosya-numarası', 'dosya numarası',
-    'soruşturma no', 'soruşturma numarası', 'sorusturma no', 'sorusturma numarasi',
-    'sorusturma_numarasi', 'soruşturma_numarası', 'no', 'numara'
+# GÖRSELDEKİ SABİT SÜTUN İSİMLERİ (YENİ EKLENDİ)
+FIXED_HEADERS = [
+    "Birim Adı", "Dosya Durumu", "Dosya Türü", "Dosya No", "Sıfatı", "Vekilleri",
+    "Dava Türleri", "Dava Konusu", "İlamat Numaraları", "Suçu", "Suç Tarihi",
+    "Karar Türü", "Kesinleşme Tarihi", "Kesinleşme Türü", "Açıklama"
 ]
 
-def detect_delimiter(sample_text: str) -> str:
-    """Basit sezgisel: ilk satırda en çok hangi ayırıcı varsa onu kullan."""
-    header = sample_text.splitlines()[0] if sample_text else ''
-    counts = {
-        '\t': header.count('\t'),
-        ';': header.count(';'),
-        ',': header.count(','),
-        '|': header.count('|'),
-    }
-    # Excel'den kopyalama genelde tab \t olur
-    # Eşitlik durumunda \t > ; > , > |
-    ordered = sorted(counts.items(), key=lambda kv: (kv[1], {'\t':3, ';':2, ',':1, '|':0}[kv[0]]), reverse=True)
-    best = ordered[0][0] if ordered else '\t'
-    return best if counts[best] > 0 else ('\t' if '\t' in header else (',' if ',' in header else (';' if ';' in header else '\t')))
+BASE_COLUMNS = ["Birim Adı", "Dosya No", "Dosya Durumu", "Dosya Türü"]
+MERGE_FIX_COLUMNS = ["Birim Adı", "Dosya Durumu", "Dosya Türü", "Dosya No", "Sıfatı", "Vekilleri"]
+VALID_DOSYA_TURU = ["Soruşturma Dosyası", "Ceza Dava Dosyası", "CBS İhbar Dosyası"]
 
-def parse_pasted_text_to_dataframe(text: str) -> pd.DataFrame:
-    """Excel'den yapıştırılmış metni DataFrame'e çevirir. İlk satır başlık kabul edilir."""
-    if not text or not text.strip():
-        raise ValueError("Yapıştırılan veri boş.")
-    delim = detect_delimiter(text)
-    reader = csv.reader(io.StringIO(text.strip()), delimiter=delim)
-    rows = [row for row in reader if any(cell.strip() for cell in row)]
-    if not rows:
-        raise ValueError("Yapıştırılan metinden satır okunamadı.")
-    header = [h.strip() for h in rows[0]]
-    # Başlıkta boş isimler varsa sütun adlarını üret
-    header = [col if col else f"Kolon_{i+1}" for i, col in enumerate(header)]
-    data = rows[1:]
-    # Satırlarda sütun sayısı başlıktan kısa ise doldur
-    fixed_rows = [r + ['']*(len(header)-len(r)) if len(r) < len(header) else r[:len(header)] for r in data]
-    df = pd.DataFrame(fixed_rows, columns=header)
-    return df
+REPLACEMENTS = {
+    "Birim Adı": {"Cumhuriyet Başsavcılığı": "CBS"},
+    "Dosya Türü": {"CBS Sorusturma Dosyası": "Soruşturma Dosyası"}
+}
 
-def normalize_column_name(name: str) -> str:
-    s = str(name).strip().lower()
-    # Türkçe karakter sadeleştirme
-    translations = str.maketrans({
-        'ı':'i', 'İ':'i', 'ş':'s', 'Ş':'s', 'ğ':'g', 'Ğ':'g', 'ü':'u', 'Ü':'u', 'ö':'o', 'Ö':'o', 'ç':'c', 'Ç':'c'
-    })
-    s = s.translate(translations)
-    s = s.replace('-', ' ').replace('_', ' ')
-    s = ' '.join(s.split())
-    return s
+# --- GÖRSEL PDF EDİTÖRÜ VE ÖNİZLEME PENCERESİ ---
 
-def detect_investigation_column(columns) -> str | None:
-    """Sütun adlarından soruşturma/dosya numarası sütununu tespit eder."""
-    norm_map = {col: normalize_column_name(col) for col in columns}
-    # Öncelik: 'dosya no'
-    for orig, norm in norm_map.items():
-        if norm in ('dosya no', 'dosya numarasi'):
-            return orig
-    # Diğer adaylar
-    for candidate in PASTE_JOIN_CANDIDATES:
-        for orig, norm in norm_map.items():
-            if candidate == norm:
-                return orig
-    # İçeriyorsa (ör. 'dosya no (eski)')
-    for candidate in ('dosya', 'sorusturma', 'sorusturma no', 'sorusturma numarasi'):
-        for orig, norm in norm_map.items():
-            if candidate in norm:
-                return orig
-    return None
+class PDFLayoutEditor:
+    def __init__(self, parent, dataframe, callback_save):
+        self.top = tk.Toplevel(parent)
+        self.top.title("PDF Düzenleme ve Önizleme")
+        self.top.geometry("1100x700")
+        self.df = dataframe
+        self.callback_save = callback_save 
+        
+        self.orientation_var = tk.StringVar(value="Landscape")
+        self.margin_var = tk.DoubleVar(value=1.0)
+        self.col_weights = {} 
+        
+        self.paned = ttk.PanedWindow(self.top, orient=tk.HORIZONTAL)
+        self.paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.settings_frame = ttk.LabelFrame(self.paned, text="Ayarlar", padding=10)
+        self.paned.add(self.settings_frame, weight=1)
+        
+        self.preview_frame = ttk.LabelFrame(self.paned, text="Şematik Önizleme (Sayfa Yerleşimi)", padding=10)
+        self.paned.add(self.preview_frame, weight=3)
+        
+        self.setup_settings_ui()
+        self.setup_preview_ui()
+        self.calculate_initial_weights()
+        self.draw_preview()
 
-def preprocess_join_column(df: pd.DataFrame, join_col: str) -> pd.Series:
-    """Birleştirme sütunu değerlerini normalize eder: strip, uppercase-insensitive, gereksiz boşlukları siler."""
-    s = df[join_col].astype(str).str.strip()
-    # Sık görülen biçim: '2024/12345' gibi. Boşlukları temizle, çoklu boşlukları tek yap.
-    s = s.str.replace('\u00A0', ' ', regex=False).str.replace('\s+', ' ', regex=True)
-    return s
+    def setup_settings_ui(self):
+        ttk.Label(self.settings_frame, text="Sayfa Yönü:", font="bold").pack(anchor="w", pady=(0, 5))
+        ttk.Radiobutton(self.settings_frame, text="Yatay (Landscape)", variable=self.orientation_var, value="Landscape", command=self.draw_preview).pack(anchor="w")
+        ttk.Radiobutton(self.settings_frame, text="Dikey (Portrait)", variable=self.orientation_var, value="Portrait", command=self.draw_preview).pack(anchor="w")
+        
+        ttk.Label(self.settings_frame, text="Kenar Boşluğu (cm):", font="bold").pack(anchor="w", pady=(15, 5))
+        scale_margin = ttk.Scale(self.settings_frame, from_=0.5, to=3.0, variable=self.margin_var, command=lambda x: self.draw_preview())
+        scale_margin.pack(fill=tk.X)
+        
+        ttk.Label(self.settings_frame, text="Sütun Genişlik Ayarları:", font="bold").pack(anchor="w", pady=(20, 5))
+        ttk.Label(self.settings_frame, text="(Sütunların kaplayacağı alanı ayarlayın)", font=("Arial", 8)).pack(anchor="w")
 
-def intersection_by_column(df1: pd.DataFrame, df2: pd.DataFrame, join_col: str) -> pd.DataFrame:
-    """İki DataFrame arasında join_col'a göre kesişim listesini döndürür (benzersiz)."""
-    if join_col not in df1.columns or join_col not in df2.columns:
-        raise KeyError(f"Birleştirme sütunu bulunamadı: {join_col}")
-    s1 = preprocess_join_column(df1, join_col)
-    s2 = preprocess_join_column(df2, join_col)
-    # Benzersiz kümeler
-    set1 = pd.Series(s1.unique()).dropna()
-    set2 = pd.Series(s2.unique()).dropna()
-    common = pd.Series(sorted(set(set1) & set(set2)))
-    result = pd.DataFrame({join_col: common})
-    # Sıralamayı mevcut mantığa benzet: 'Yıl/No'
-    try:
-        split_data = result[join_col].astype(str).str.split('/', n=1, expand=True)
-        result['_Yil'] = pd.to_numeric(split_data[0].str.strip(), errors='coerce')
-        if split_data.shape[1] > 1:
-            num_part = split_data[1].astype(str).str.replace(r'[^\d]', '', regex=True)
-            result['_No'] = pd.to_numeric(num_part, errors='coerce')
+        canvas_scroll = tk.Canvas(self.settings_frame, height=300)
+        scrollbar = ttk.Scrollbar(self.settings_frame, orient="vertical", command=canvas_scroll.yview)
+        self.sliders_frame = ttk.Frame(canvas_scroll)
+        
+        self.sliders_frame.bind("<Configure>", lambda e: canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all")))
+        canvas_scroll.create_window((0, 0), window=self.sliders_frame, anchor="nw")
+        canvas_scroll.configure(yscrollcommand=scrollbar.set)
+        
+        canvas_scroll.pack(side="top", fill="both", expand=True, pady=5)
+        scrollbar.pack(side="right", fill="y")
+        
+        btn_frame = ttk.Frame(self.settings_frame)
+        btn_frame.pack(side="bottom", fill="x", pady=10)
+        
+        ttk.Button(btn_frame, text="👁️ Gerçek PDF Önizle", command=self.generate_temp_preview).pack(fill=tk.X, pady=2)
+        ttk.Button(btn_frame, text="💾 PDF Olarak Kaydet", command=self.save_final).pack(fill=tk.X, pady=(10, 2))
+
+    def setup_preview_ui(self):
+        self.canvas = tk.Canvas(self.preview_frame, bg="gray")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Configure>", lambda event: self.draw_preview())
+
+    def calculate_initial_weights(self):
+        self.sliders = {}
+        for col in self.df.columns:
+            max_len = len(str(col))
+            data_len = self.df[col].astype(str).map(len).head(50).max()
+            if pd.isna(data_len): data_len = 0
+            weight = max(max_len, data_len, 5)
+            self.col_weights[col] = tk.DoubleVar(value=weight)
+            f = ttk.Frame(self.sliders_frame)
+            f.pack(fill=tk.X, pady=2)
+            ttk.Label(f, text=col[:20], width=15, anchor="w").pack(side=tk.LEFT)
+            s = ttk.Scale(f, from_=1, to=100, variable=self.col_weights[col], command=lambda x: self.draw_preview())
+            s.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def draw_preview(self):
+        self.canvas.delete("all")
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 50: return
+        
+        if self.orientation_var.get() == "Landscape":
+            ratio = 29.7 / 21.0
         else:
-            result['_No'] = pd.NA
-        result = result.sort_values(by=['_Yil', '_No'], na_position='last').reset_index(drop=True)
-        result = result.drop(columns=['_Yil', '_No'])
-    except Exception:
-        pass
-    result.insert(0, 'Sıra No', range(1, len(result) + 1))
-    return result
+            ratio = 21.0 / 29.7
+            
+        paper_h = h - 40
+        paper_w = paper_h * ratio
+        
+        if paper_w > w - 40:
+            paper_w = w - 40
+            paper_h = paper_w / ratio
+            
+        x_start = (w - paper_w) / 2
+        y_start = (h - paper_h) / 2
+        
+        self.canvas.create_rectangle(x_start, y_start, x_start + paper_w, y_start + paper_h, fill="white", outline="black", width=2)
+        
+        margin_cm = self.margin_var.get()
+        page_width_cm = 29.7 if self.orientation_var.get() == "Landscape" else 21.0
+        px_per_cm = paper_w / page_width_cm
+        margin_px = margin_cm * px_per_cm
+        
+        draw_x = x_start + margin_px
+        draw_y = y_start + margin_px
+        draw_w = paper_w - (2 * margin_px)
+        draw_h = paper_h - (2 * margin_px)
+        
+        self.canvas.create_rectangle(draw_x, draw_y, draw_x + draw_w, draw_y + draw_h, outline="red", dash=(2, 4))
+        
+        total_weight = sum(v.get() for v in self.col_weights.values())
+        if total_weight == 0: total_weight = 1
+        
+        current_x = draw_x
+        colors_cycle = ["#e6f3ff", "#fff0e6", "#e6ffe6", "#fffde6"]
+        
+        for i, col in enumerate(self.df.columns):
+            weight = self.col_weights[col].get()
+            col_px = (weight / total_weight) * draw_w
+            self.canvas.create_rectangle(current_x, draw_y, current_x + col_px, draw_y + draw_h, fill=colors_cycle[i%4], outline="gray")
+            if col_px > 20:
+                self.canvas.create_text(current_x + col_px/2, draw_y + 15, text=col[:10], font=("Arial", 7), angle=90)
+            current_x += col_px
 
-# --- Temel Mantık Fonksiyonları ---
+    def get_column_widths_cm(self, page_width_cm):
+        total_weight = sum(v.get() for v in self.col_weights.values())
+        if total_weight == 0: total_weight = 1
+        widths = []
+        for col in self.df.columns:
+            w = (self.col_weights[col].get() / total_weight) * page_width_cm
+            widths.append(w * cm)
+        return widths
 
-def process_files(file1_path, file2_path, columns_to_use, column_rename_map, log_callback):
-    """İki Excel dosyasını okur, birleştirir, temizler, filtreler, sıralar ve sütun adlarını değiştirir."""
+    def create_pdf_data(self, output_path):
+        margin = self.margin_var.get()
+        orientation = self.orientation_var.get()
+        page_size = landscape(A4) if orientation == "Landscape" else A4
+        page_w_pt, page_h_pt = page_size
+        margin_pt = margin * cm
+        printable_width_cm = (page_w_pt / cm) - (2 * margin)
+        col_widths = self.get_column_widths_cm(printable_width_cm)
+        
+        doc = SimpleDocTemplate(output_path, pagesize=page_size, leftMargin=margin_pt, rightMargin=margin_pt, topMargin=margin_pt, bottomMargin=margin_pt)
+        elements = []
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontName=font_bold, alignment=1, spaceAfter=10)
+        elements.append(Paragraph(f"Karşılaştırma Raporu - {datetime.now().strftime('%d.%m.%Y')}", title_style))
+        elements.append(Spacer(1, 0.5 * cm))
+        
+        cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontName=font_regular, fontSize=8, leading=10, alignment=TA_LEFT)
+        header_style = ParagraphStyle('HeaderStyle', parent=styles['Normal'], fontName=font_bold, fontSize=9, textColor=colors.whitesmoke, alignment=TA_CENTER)
+        
+        data = []
+        headers = [Paragraph(col, header_style) for col in self.df.columns]
+        data.append(headers)
+        
+        for row in self.df.values:
+            row_data = []
+            for item in row:
+                text = str(item) if pd.notna(item) else ""
+                row_data.append(Paragraph(text, cell_style))
+            data.append(row_data)
+            
+        table = Table(data, colWidths=col_widths, repeatRows=1)
+        tbl_style = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.aliceblue, colors.whitesmoke]),
+            ('LEFTPADDING', (0,0), (-1,-1), 3), ('RIGHTPADDING', (0,0), (-1,-1), 3),
+            ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ])
+        table.setStyle(tbl_style)
+        elements.append(table)
+        elements.append(Spacer(1, 0.5 * cm))
+        elements.append(Paragraph(f"Toplam Kayıt Sayısı: {len(self.df)}", styles['Normal']))
+        
+        try:
+            doc.build(elements)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    def generate_temp_preview(self):
+        try:
+            fd, temp_path = tempfile.mkstemp(suffix=".pdf")
+            os.close(fd)
+            success, msg = self.create_pdf_data(temp_path)
+            if success:
+                if platform.system() == 'Windows': os.startfile(temp_path)
+                elif platform.system() == 'Darwin': subprocess.call(('open', temp_path))
+                else: subprocess.call(('xdg-open', temp_path))
+            else: messagebox.showerror("Hata", f"Önizleme oluşturulamadı: {msg}")
+        except Exception as e: messagebox.showerror("Hata", f"Önizleme hatası: {e}")
+
+    def save_final(self):
+        file_path = filedialog.asksaveasfilename(defaultextension=".pdf", initialfile=f"Rapor_{datetime.now().strftime('%Y%m%d')}.pdf", filetypes=[("PDF Dosyası", "*.pdf")], title="PDF Kaydet")
+        if file_path:
+            success, msg = self.create_pdf_data(file_path)
+            if success:
+                messagebox.showinfo("Başarılı", "PDF dosyası kaydedildi.")
+                try: os.startfile(file_path)
+                except: pass
+                self.top.destroy()
+            else: messagebox.showerror("Hata", f"Kaydedilemedi: {msg}")
+
+# --- VERİ İŞLEME FONKSİYONLARI ---
+
+def parse_clipboard_data(clipboard_text, log_callback):
+    """
+    Panodaki veriyi okur. Sütun isimleri FIXED_HEADERS'dan alınır.
+    header=None yapılarak ilk satırın veri olması sağlanır.
+    """
     try:
-        log_callback(f"{os.path.basename(file1_path)} okunuyor...")
-        # Sadece gerekli sütunları oku
-        df1 = pd.read_excel(file1_path, usecols=lambda c: c in columns_to_use)
-        log_callback(f"{os.path.basename(file2_path)} okunuyor...")
-        df2 = pd.read_excel(file2_path, usecols=lambda c: c in columns_to_use)
+        if not clipboard_text or clipboard_text.strip() == "":
+            log_callback("Hata: Yapıştırılan veri boş.", "ERROR")
+            return None
+        
+        # header=None: Verinin içinde başlık satırı yok kabul et
+        # names=FIXED_HEADERS: Başlıkları biz zorla atıyoruz
+        df = pd.read_csv(io.StringIO(clipboard_text), sep='\t', engine='python', dtype=str, header=None, names=FIXED_HEADERS)
+        
+        df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+        df = df.replace(r'^\s*$', np.nan, regex=True).infer_objects(copy=False)
+        
+        cols_to_fill = [col for col in MERGE_FIX_COLUMNS if col in df.columns]
+        if cols_to_fill:
+            df[cols_to_fill] = df[cols_to_fill].ffill()
+        
+        df = df.fillna("")
+        log_callback(f"Veri parça olarak işlendi: {len(df)} satır.", "INFO")
+        return df
+        
+    except Exception as e:
+        log_callback(f"Veri işlenirken hata: {e}", "ERROR")
+        log_callback(f"Detay: {traceback.format_exc()}", "DEBUG")
+        return None
 
-        # Kontrol: Gerekli tüm sütunlar okundu mu?
+def process_comparison(df1, df2, columns_to_use, log_callback):
+    try:
         missing_cols_df1 = [col for col in columns_to_use if col not in df1.columns]
         if missing_cols_df1:
-            raise KeyError(f"{os.path.basename(file1_path)} dosyasında eksik sütunlar: {', '.join(missing_cols_df1)}")
-
+            log_callback(f"İlk veri setinde eksik sütunlar: {', '.join(missing_cols_df1)}", "ERROR")
+            return None
+            
         missing_cols_df2 = [col for col in columns_to_use if col not in df2.columns]
         if missing_cols_df2:
-            raise KeyError(f"{os.path.basename(file2_path)} dosyasında eksik sütunlar: {', '.join(missing_cols_df2)}")
-
-
-    except FileNotFoundError as e:
-        log_callback(f"Hata: Dosya bulunamadı - {e}")
-        return None
-    except KeyError as e:
-        log_callback(f"Hata: Sütun bulunamadı - {e}")
-        return None
-    except pd.errors.EmptyDataError:
-         log_callback(f"Hata: {os.path.basename(file1_path)} veya {os.path.basename(file2_path)} dosyası boş veya okunabilir veri içermiyor.")
-         return None
-    except Exception as e:
-        log_callback(f"Excel dosyaları okunurken hata ({os.path.basename(file1_path)}, {os.path.basename(file2_path)}): {e}")
-        log_callback(traceback.format_exc()) # Hatanın detayını logla
-        return None
-
-    log_callback("Dosyalar birleştiriliyor...")
-    # Verileri birleştir (tüm columns_to_use sütunları üzerinden aynı kayıtları bul)
-    # inner join sadece her iki dosyada da ortak olan satırları alır
-    # Birleştirme öncesi sütun isimlerinin tam eşleştiğinden emin ol
-    try:
-         # Sütunların string olduğundan emin ol ve boşlukları kaldır
-         df1.columns = df1.columns.astype(str).str.strip()
-         df2.columns = df2.columns.astype(str).str.strip()
-         merged_df = pd.merge(df1, df2, on=columns_to_use, how='inner')
-    except KeyError as e:
-         log_callback(f"Hata: Birleştirme sütunları ({', '.join(BASE_COLUMNS)}) dosyalarda eşleşmiyor veya bulunamıyor. Hata: {e}")
-         return None
-    except Exception as e:
-         log_callback(f"Birleştirme sırasında beklenmedik hata: {e}")
-         log_callback(traceback.format_exc())
-         return None
-
-
-    # Birleştirmeden sonra aynı satırlar olabilir, tekrar edenleri kaldır
-    merged_df = merged_df.drop_duplicates(subset=BASE_COLUMNS).reset_index(drop=True)
-
-
-    if merged_df.empty:
-        log_callback(f"Bilgi: {os.path.basename(file1_path)} ve {os.path.basename(file2_path)} arasında ortak kayıt bulunamadı. Kontrol Edilen Sütunlar: {columns_to_use}")
-        return pd.DataFrame() # Boş DataFrame döndür
-
-    log_callback(f"Ortak kayıt sayısı (birleştirme sonrası): {len(merged_df)}")
-
-    # Metin değişimlerini uygula (büyük/küçük harf duyarlılığı olmadan)
-    log_callback("Metin değişimleri uygulanıyor...")
-    for col, replacements in REPLACEMENTS.items():
-        if col in merged_df.columns:
-            # NaN değerleri string'e çevirirken 'nan' olmasını önle
-            # .loc ile atama yaparak SettingWithCopyWarning'den kaçın
-            merged_df.loc[:, col] = merged_df[col].apply(lambda x: str(x) if pd.notna(x) else '').str.strip()
-            for old, new in replacements.items():
-                 # Regex=False kullanmak özel karakter sorunlarını azaltır
-                 # inplace=True kullanmak yerine atama yapıyoruz, pandas uyumluluğu için daha iyi
-                 merged_df.loc[:, col] = merged_df[col].str.replace(old, new, case=False, regex=False)
-
-
-    # Boşlukları temizle (yukarıda değişimler sırasında yapılıyor ama ek kontrol zarar vermez)
-    for col in merged_df.columns:
-         if merged_df[col].dtype == 'object': # Eğer sütun tipi object (genellikle string) ise
-              merged_df.loc[:, col] = merged_df[col].astype(str).str.strip()
-
-
-    # Dosya Türü'ne göre filtrele
-    if "Dosya Türü" in merged_df.columns:
-        log_callback(f"'Dosya Türü'ne göre filtreleme uygulanıyor: {VALID_DOSYA_TURU}")
-        # Filtreleme sonrası SettingWithCopyWarning almamak için .copy() kullan
-        filtered_df = merged_df[merged_df["Dosya Türü"].isin(VALID_DOSYA_TURU)].copy()
-    else:
-        log_callback("Uyarı: 'Dosya Türü' sütunu bulunamadı, filtreleme atlanıyor.")
-        filtered_df = merged_df.copy() # Kopyasını al
-
-    if filtered_df.empty:
-        log_callback(f"Bilgi: Birleştirme ve filtreleme sonrası geçerli kayıt bulunamadı.")
-        return pd.DataFrame() # Boş DataFrame döndür
-
-    log_callback(f"Filtreleme sonrası ortak kayıt sayısı: {len(filtered_df)}")
-
-
-    # Sıralama
-    log_callback("Veriler sıralanıyor...")
-    if 'Dosya No' in filtered_df.columns:
-        try:
-            # 'Dosya No' sütununu stringe çevir ve böl
-            # NaN değerleri boş string olarak ele al
-            # .loc ile atama yaparak SettingWithCopyWarning'den kaçın
-            split_data = filtered_df['Dosya No'].astype(str).str.split('/', expand=True)
-
-            # Yıl kısmını al (genellikle ilk parça), hataları NaN yap
-            filtered_df.loc[:, 'Yıl'] = pd.to_numeric(split_data[0], errors='coerce')
-
-            # Numara kısmını al (genellikle ikinci parça)
-            if len(split_data.columns) > 1:
-                # Numara kısmındaki '-' gibi karakterleri temizle ve sayıya çevir
-                no_part = split_data[1].astype(str).str.replace(r'[^\d]', '', regex=True) # Sadece rakamları bırak
-                filtered_df.loc[:, 'No'] = pd.to_numeric(no_part, errors='coerce')
-            else:
-                filtered_df.loc[:, 'No'] = None # Numara kısmı yoksa None
-
-            # Sıralama için kullanılacak sütunlar
-            sort_columns = []
-            if 'Birim Adı' in filtered_df.columns:
-                # Birim Adı'nda NaN değerleri string olarak ele al ve sırala
-                 filtered_df.loc[:, 'Birim Adı_str'] = filtered_df['Birim Adı'].astype(str)
-                 sort_columns.append('Birim Adı_str')
-
-            # Yıl ve No sütunlarını sıralama sütunlarına ekle
-            sort_columns.extend(['Yıl', 'No'])
-
-            # Sıralama işlemini uygula
-            # NaN değerler sıralamada sonda yer alsın
-            # inplace=True yerine yeni DataFrame'e atama yap
-            filtered_df = filtered_df.sort_values(by=sort_columns, na_position='last').reset_index(drop=True)
-
-            # Sıralama için eklenen yardımcı sütunları kaldır
-            filtered_df = filtered_df.drop(['Yıl', 'No'], axis=1, errors='ignore')
-            if 'Birim Adı_str' in filtered_df.columns:
-                 filtered_df = filtered_df.drop('Birim Adı_str', axis=1)
-
-
-        except Exception as e:
-             log_callback(f"Uyarı: 'Dosya No'ya göre detaylı sıralama başarısız oldu: {e}. Alternatif sıralama uygulanıyor.")
-             log_callback(traceback.format_exc())
-             if 'Birim Adı' in filtered_df.columns:
-                 # Birim Adı'na göre basit sıralama
-                 # inplace=True yerine yeni DataFrame'e atama yap
-                 filtered_df.loc[:, 'Birim Adı_str'] = filtered_df['Birim Adı'].astype(str)
-                 filtered_df = filtered_df.sort_values(by=['Birim Adı_str'], na_position='last').drop('Birim Adı_str', axis=1).reset_index(drop=True)
-             else:
-                 log_callback("Uyarı: Sıralama yapılamadı.")
-
-
-    else:
-        log_callback("Uyarı: 'Dosya No' sütunu bulunamadı, detaylı sıralama atlanıyor.")
-        if 'Birim Adı' in filtered_df.columns:
-             # Birim Adı'na göre basit sıralama
-             # inplace=True yerine yeni DataFrame'e atama yap
-             filtered_df.loc[:, 'Birim Adı_str'] = filtered_df['Birim Adı'].astype(str)
-             filtered_df = filtered_df.sort_values(by=['Birim Adı_str'], na_position='last').drop('Birim Adı_str', axis=1).reset_index(drop=True)
-
-
-    # Sütun adlarını değiştir ve Sıra No ekle
-    log_callback("Sütun adları değiştiriliyor ve Sıra No ekleniyor.")
-    if column_rename_map:
-        # Yalnızca DataFrame'de bulunan sütunları yeniden adlandır
-        valid_rename_map = {k: v for k, v in column_rename_map.items() if k in filtered_df.columns}
-        if valid_rename_map: # Eğer geçerli yeniden adlandırma varsa uygula
-            # inplace=True yerine atama yap
-            filtered_df = filtered_df.rename(columns=valid_rename_map)
-
-    final_df = filtered_df.reset_index(drop=True)
-    final_df.insert(0, 'Sıra No', range(1, len(final_df) + 1))
-
-    log_callback("Veri işleme tamamlandı.")
-    return final_df
-
-def build_pdf_report(output_pdf_path, dataframe, file1_name, file2_name, page_orientation, background_info, margins_cm, log_callback, comparison_columns=None):
-    """İşlenmiş verilerle PDF dokümanını oluşturur."""
-    styles = get_base_styles()
-
-    # Sayfa yönüne göre sayfa boyutunu ayarla
-    page_size = landscape(A4) if page_orientation == "Landscape" else A4
-
-    # Santimetre cinsinden gelen boşlukları ReportLab'in nokta birimine çevir
-    left_margin_pt = margins_cm["left"] * cm
-    right_margin_pt = margins_cm["right"] * cm
-    top_margin_pt = margins_cm["top"] * cm
-    bottom_margin_pt = margins_cm["bottom"] * cm
-
-    # Kenar boşlukları sayfa boyutundan büyük olmamalı
-    page_width_pt, page_height_pt = page_size
-    if left_margin_pt + right_margin_pt >= page_width_pt or top_margin_pt + bottom_margin_pt >= page_height_pt:
-        log_callback(f"Hata: Hesaplanan kenar boşlukları sayfa boyutundan büyük veya eşit! Sol+Sağ: {left_margin_pt+right_margin_pt:.2f} vs {page_width_pt:.2f}, Üst+Alt: {top_margin_pt+bottom_margin_pt:.2f} vs {page_height_pt:.2f}")
-        # Varsayılan güvenli boşluklara dön veya hata ver
-        # Şimdilik hata verip işlemi durdurmak daha güvenli
-        root.after(0, lambda: messagebox.showerror("Kenar Boşluğu Hatası", "Belirtilen kenar boşlukları sayfa boyutuna sığmıyor. Lütfen daha küçük değerler girin."))
-        return False # PDF oluşturulamadı
-
-    # Doküman şablonunu oluştur
-    doc = SimpleDocTemplate(
-        output_pdf_path,
-        pagesize=page_size,
-        leftMargin=left_margin_pt, rightMargin=right_margin_pt,
-        topMargin=top_margin_pt, bottomMargin=bottom_margin_pt,
-        title=f"Karşılaştırma - {os.path.basename(file1_name)} vs {os.path.basename(file2_name)}",
-        author="Comparison Tool"
-    )
-
-    elements = []
-
-    # Başlık
-    title_text = f"{datetime.now().strftime('%d/%m/%Y')} Tarihi İtibarıyla Müşterek Dosyalar"
-    elements.append(Paragraph(title_text, styles['h1']))
-    elements.append(Spacer(1, 0.2*cm))
-
-    # # Alt Başlık/Kaynak Dosyalar
-    # subtitle_text = f"(Kaynak Dosyalar: {os.path.basename(file1_name)}.xlsx ve {os.path.basename(file2_name)}.xlsx)"
-    # elements.append(Paragraph(subtitle_text, styles['h3']))
-    # elements.append(Spacer(1, 0.5*cm))
-
-    # Tablo
-    # DataFrame'i list of lists formatına çevir (başlık satırı dahil)
-    # NaN değerleri veya None'ları boş string'e çevir
-    data_list = [dataframe.columns.to_list()] + [[str(cell) if pd.notna(cell) else "" for cell in row] for row in dataframe.values.tolist()]
-
-    # Tablonun sığabileceği kullanılabilir genişlik
-    available_width = doc.width # Bu, pagesize[0] - leftMargin - rightMargin'e eşittir
-
-    # Sütun genişliklerini hesapla
-    try:
-        column_widths = calculate_column_widths(dataframe, available_width)
-    except Exception as e:
-        log_callback(f"Hata: Sütun genişlikleri hesaplanırken hata oluştu: {e}")
-        log_callback(traceback.format_exc())
-        # Hata durumunda varsayılan genişlikler kullanmayı deneyebiliriz veya hata ver
-        # Şimdilik hata verip işlemi durdurmak daha güvenli
-        root.after(0, lambda: messagebox.showerror("PDF Oluşturma Hatası", f"Sütun genişlikleri hesaplanırken hata oluştu:\n{e}\nPDF oluşturulamadı."))
-        return False
-
-
-    # Tabloyu oluştur
-    table = Table(data_list, colWidths=column_widths, repeatRows=1) # repeatRows=1 başlığın her sayfada tekrarlanmasını sağlar
-    table.setStyle(create_table_style(len(data_list)))
-    elements.append(table)
-
-    # Not Bölümü (Tablodan sonra yeni sayfaya geçilirse not altta kalır, bu genelde istenen durumdur)
-    elements.append(Spacer(1, 0.5*cm))
-    used_cols = comparison_columns if comparison_columns else BASE_COLUMNS
-    note_text = f"<b>Not:</b> Bu tablo, <u>{os.path.basename(file1_name)}.xlsx</u> ve <u>{os.path.basename(file2_name)}.xlsx</u> dosyalarında bulunan ortak kayıtları göstermektedir. Karşılaştırma {', '.join(used_cols)} sütunlarına göre yapılmıştır."
-    elements.append(Paragraph(note_text, styles['Normal']))
-
-    # PDF Oluştur
-    log_callback(f"PDF oluşturuluyor: {os.path.basename(output_pdf_path)}")
-    try:
-        background_func = None
-        if background_info and background_info["type"] != "None":
-            # Arka plan fonksiyonunu tanımla, geçerli doc boşlukları ve sayfa boyutu burada kullanılabilir
-            def page_background(canvas, doc):
-                draw_background(canvas, doc, background_info["type"], background_info["value"])
-            background_func = page_background
-
-        if background_func:
-            doc.build(elements, onFirstPage=background_func, onLaterPages=background_func)
+            log_callback(f"İkinci veri setinde eksik sütunlar: {', '.join(missing_cols_df2)}", "ERROR")
+            return None
+        
+        log_callback("Veriler birleştiriliyor...", "INFO")
+        
+        for col in columns_to_use:
+            df1[col] = df1[col].astype(str).str.strip()
+            df2[col] = df2[col].astype(str).str.strip()
+        
+        merged_df = pd.merge(df1, df2, on=columns_to_use, how='inner')
+        merged_df = merged_df.drop_duplicates(subset=columns_to_use).reset_index(drop=True)
+        
+        if merged_df.empty:
+            log_callback("Bilgi: Ortak kayıt bulunamadı.", "INFO")
+            return pd.DataFrame()
+        
+        for col, replacements_map in REPLACEMENTS.items():
+            if col in merged_df.columns:
+                for old, new in replacements_map.items():
+                    merged_df[col] = merged_df[col].str.replace(old, new, case=False, regex=False)
+        
+        if "Dosya Türü" in merged_df.columns:
+            filtered_df = merged_df[merged_df["Dosya Türü"].isin(VALID_DOSYA_TURU)]
         else:
-            doc.build(elements)
-
-        log_callback(f"BAŞARILI: PDF oluşturuldu -> {output_pdf_path}")
-
-        return True
-
+            filtered_df = merged_df
+        
+        if filtered_df.empty:
+            log_callback("Bilgi: Filtreleme sonrası geçerli kayıt bulunamadı.", "INFO")
+            return pd.DataFrame()
+            
+        if 'Dosya No' in filtered_df.columns:
+            try:
+                temp_df = filtered_df.copy()
+                split_data = temp_df['Dosya No'].astype(str).str.split('/', n=1, expand=True)
+                temp_df['_Yil'] = pd.to_numeric(split_data[0].str.strip(), errors='coerce')
+                
+                if split_data.shape[1] > 1:
+                    temp_df['_No'] = pd.to_numeric(split_data[1].astype(str).str.replace(r'[^\d]', '', regex=True), errors='coerce')
+                else:
+                    temp_df['_No'] = 0
+                
+                sort_cols = ['_Yil', '_No']
+                if 'Birim Adı' in temp_df.columns:
+                    sort_cols.insert(0, 'Birim Adı')
+                    
+                temp_df = temp_df.sort_values(by=sort_cols, na_position='last')
+                filtered_df = temp_df.drop(columns=['_Yil', '_No'], errors='ignore')
+            except Exception as e:
+                log_callback(f"Sıralama uyarısı: {e}", "WARN")
+        
+        final_df = filtered_df.copy()
+        final_df.insert(0, 'Sıra No', range(1, len(final_df) + 1))
+        return final_df
+        
     except Exception as e:
-        log_callback(f"KRİTİK HATA: PDF oluşturulamadı ({os.path.basename(output_pdf_path)}): {e}")
-        log_callback(traceback.format_exc()) # Hatanın detayını logla
-        # Hata mesajını GUI'de de göster
-        root.after(0, lambda: messagebox.showerror("PDF Hatası", f"PDF oluşturulamadı:\n{os.path.basename(output_pdf_path)}\nHata: {e}"))
-        return False
+        log_callback(f"Karşılaştırma sırasında hata: {e}", "ERROR")
+        log_callback(f"Detay: {traceback.format_exc()}", "DEBUG")
+        return None
 
-# --- Ana Uygulama Sınıfı (GUI) ---
+# --- SÜTUN SEÇİCİ PENCERESİ ---
 
-class ComparisonApp:
+class ColumnSelectorDialog:
+    def __init__(self, parent, all_columns, currently_selected, callback):
+        self.top = tk.Toplevel(parent)
+        self.top.title("Görünümü Özelleştir (Analist Modu)")
+        self.top.geometry("500x600")
+        self.callback = callback
+        self.all_columns = all_columns
+        self.vars = {}
+        
+        for col in all_columns:
+            is_selected = (col in currently_selected) if currently_selected is not None else True
+            self.vars[col] = tk.BooleanVar(value=is_selected)
+        
+        lbl = ttk.Label(self.top, text="Analiz etmek istediğiniz sütunları seçin:", font=('Arial', 10, 'bold'))
+        lbl.pack(pady=10)
+        
+        filter_frame = ttk.Frame(self.top)
+        filter_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(filter_frame, text="Filtrele:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", self.filter_list)
+        entry = ttk.Entry(filter_frame, textvariable=self.search_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        frame_container = ttk.Frame(self.top)
+        frame_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        canvas = tk.Canvas(frame_container)
+        scrollbar = ttk.Scrollbar(frame_container, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+        
+        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.create_checkbuttons()
+
+        btn_frame = ttk.Frame(self.top)
+        btn_frame.pack(fill=tk.X, pady=10, padx=10)
+        
+        ttk.Button(btn_frame, text="Tümünü Seç", command=self.select_all).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Tümünü Kaldır", command=self.deselect_all).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="UYGULA ve RAPORLA", command=self.apply_selection).pack(side=tk.RIGHT, padx=5)
+
+    def create_checkbuttons(self, filter_text=""):
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        filter_text = filter_text.lower()
+        for col in self.all_columns:
+            if filter_text and filter_text not in col.lower(): continue
+            cb = ttk.Checkbutton(self.scrollable_frame, text=col, variable=self.vars[col])
+            cb.pack(anchor='w', pady=2)
+
+    def filter_list(self, *args): self.create_checkbuttons(self.search_var.get())
+    def select_all(self):
+        for col in self.vars: self.vars[col].set(True)
+    def deselect_all(self):
+        for col in self.vars: self.vars[col].set(False)
+    def apply_selection(self):
+        selected = [col for col in self.all_columns if self.vars[col].get()]
+        if not selected:
+            messagebox.showwarning("Uyarı", "En az bir sütun seçmelisiniz.")
+            return
+        self.callback(selected)
+        self.top.destroy()
+
+# --- ANA UYGULAMA ---
+
+class PasteComparisonApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Excel Dosya Karşılaştırma ve PDF Oluşturma Aracı")
-        # Pencere boyutunu biraz küçült çünkü bir satır eksildi
-        self.root.geometry("750x700")
-
-        # Stil yapılandırması
+        self.root.title("Excel Veri Karşılaştırma ve Gelişmiş PDF Aracı")
+        self.root.geometry("1400x850")
         self.style = ttk.Style(self.root)
         self.style.theme_use('clam')
+        self.hide_empty_cols_var = tk.BooleanVar(value=False)
+        
+        main_container = ttk.Frame(self.root, padding="10")
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        title_frame = ttk.Frame(main_container)
+        title_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(title_frame, text="Excel Dosya Karşılaştırma ve Raporlama Aracı", font=('Arial', 14, 'bold')).pack()
+        
+        self.paned_window = ttk.PanedWindow(main_container, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Sol Panel
+        self.left_frame = ttk.LabelFrame(self.paned_window, text="📋 İlk Excel Verisi", padding="5")
+        self.paned_window.add(self.left_frame, weight=1)
+        name_frame1 = ttk.Frame(self.left_frame)
+        name_frame1.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(name_frame1, text="Dosya Adı:").pack(side=tk.LEFT)
+        self.name_entry1 = ttk.Entry(name_frame1)
+        self.name_entry1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.name_entry1.insert(0, "Excel_1.xlsx")
+        tree_cont1 = ttk.Frame(self.left_frame)
+        tree_cont1.pack(fill=tk.BOTH, expand=True)
+        self.tree1 = self.create_treeview(tree_cont1)
+        btn_frame1 = ttk.Frame(self.left_frame)
+        btn_frame1.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_frame1, text="Yapıştır (Ctrl+V)", command=lambda: self.paste_data(1)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame1, text="Temizle", command=lambda: self.clear_tree(1)).pack(side=tk.LEFT, padx=2)
+        self.count_label1 = ttk.Label(btn_frame1, text="Satır: 0", foreground='blue')
+        self.count_label1.pack(side=tk.RIGHT)
 
-        # Değişkenler
-        # self.input_folder artık kullanılmıyor
-        self.output_folder = tk.StringVar(value=os.getcwd())
-        self.page_orientation = tk.StringVar(value="Landscape")
-        self.background_type = tk.StringVar(value="None")
-        self.background_value = tk.StringVar()
-        self.column_rename_map = DEFAULT_COLUMN_RENAME_MAP.copy()
+        # Sağ Panel
+        self.right_frame = ttk.LabelFrame(self.paned_window, text="📋 İkinci Excel Verisi", padding="5")
+        self.paned_window.add(self.right_frame, weight=1)
+        name_frame2 = ttk.Frame(self.right_frame)
+        name_frame2.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(name_frame2, text="Dosya Adı:").pack(side=tk.LEFT)
+        self.name_entry2 = ttk.Entry(name_frame2)
+        self.name_entry2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.name_entry2.insert(0, "Excel_2.xlsx")
+        tree_cont2 = ttk.Frame(self.right_frame)
+        tree_cont2.pack(fill=tk.BOTH, expand=True)
+        self.tree2 = self.create_treeview(tree_cont2)
+        btn_frame2 = ttk.Frame(self.right_frame)
+        btn_frame2.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_frame2, text="Yapıştır (Ctrl+V)", command=lambda: self.paste_data(2)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame2, text="Temizle", command=lambda: self.clear_tree(2)).pack(side=tk.LEFT, padx=2)
+        self.count_label2 = ttk.Label(btn_frame2, text="Satır: 0", foreground='blue')
+        self.count_label2.pack(side=tk.RIGHT)
+        
+        control_frame = ttk.Frame(main_container)
+        control_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(control_frame, text="🔍 Karşılaştır", command=self.compare_data).pack(side=tk.LEFT, padx=5)
+        self.btn_customize = ttk.Button(control_frame, text="🛠️ Sütunları Seç", command=self.open_column_selector, state=tk.DISABLED)
+        self.btn_customize.pack(side=tk.LEFT, padx=5)
+        self.btn_pdf = ttk.Button(control_frame, text="📄 PDF Önizle ve Kaydet", command=self.open_pdf_editor, state=tk.DISABLED)
+        self.btn_pdf.pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="📋 Excel/Kopyala", command=self.copy_result_to_clipboard).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="🗑️ Tümünü Temizle", command=self.clear_all).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(control_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Checkbutton(control_frame, text="Boş Sütunları Gizle", variable=self.hide_empty_cols_var, command=self.refresh_all_views).pack(side=tk.LEFT, padx=5)
+        
+        result_frame = ttk.LabelFrame(main_container, text="📊 Karşılaştırma Sonucu", padding="5")
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.stats_label = ttk.Label(result_frame, text="Henüz karşılaştırma yapılmadı.", foreground='gray', font=('Arial', 9, 'italic'))
+        self.stats_label.pack(anchor=tk.W)
+        res_tree_cont = ttk.Frame(result_frame)
+        res_tree_cont.pack(fill=tk.BOTH, expand=True)
+        self.result_tree = self.create_treeview(res_tree_cont)
+        
+        log_frame = ttk.LabelFrame(main_container, text="📝 İşlem Logları", padding="5")
+        log_frame.pack(fill=tk.X, pady=(5, 0))
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=5, font=('Consolas', 8), state=tk.DISABLED)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.setup_log_tags()
+        
+        if font_regular == "Helvetica":
+            self.log_status("Uyarı: 'DejaVuSans.ttf' bulunamadı. Türkçe karakterler PDF'te hatalı görünebilir.", "WARN")
 
-        # Kenar boşluğu değişkenleri (cm cinsinden)
-        self.left_margin = tk.DoubleVar(value=DEFAULT_MARGIN_CM)
-        self.right_margin = tk.DoubleVar(value=DEFAULT_MARGIN_CM)
-        self.top_margin = tk.DoubleVar(value=DEFAULT_MARGIN_CM)
-        self.bottom_margin = tk.DoubleVar(value=DEFAULT_MARGIN_CM)
+        self.result_df = None
+        self.display_df = None
+        self.df1 = None
+        self.df2 = None
+        self.current_selected_columns = None 
+        self.root.bind('<Control-v>', self.handle_paste_shortcut)
 
+    def create_treeview(self, parent):
+        sby = ttk.Scrollbar(parent, orient=tk.VERTICAL)
+        sbx = ttk.Scrollbar(parent, orient=tk.HORIZONTAL)
+        tree = ttk.Treeview(parent, yscrollcommand=sby.set, xscrollcommand=sbx.set, show='tree headings', selectmode='extended')
+        sby.config(command=tree.yview)
+        sbx.config(command=tree.xview)
+        tree.grid(row=0, column=0, sticky='nsew')
+        sby.grid(row=0, column=1, sticky='ns')
+        sbx.grid(row=1, column=0, sticky='ew')
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        return tree
 
-        # Arayüz Çerçeveleri
-        # Ayarlar çerçevesini en üste alıyoruz
-        options_frame = ttk.LabelFrame(self.root, text="Ayarlar", padding="10")
-        options_frame.pack(fill=tk.X, expand=False, padx=10, pady=5) # Ayarlar sabit boyutta kalsın, genişlesin
+    def setup_log_tags(self):
+        self.log_text.tag_configure("INFO", foreground="black")
+        self.log_text.tag_configure("WARN", foreground="orange")
+        self.log_text.tag_configure("ERROR", foreground="red")
+        self.log_text.tag_configure("DEBUG", foreground="gray")
+        self.log_text.tag_configure("SUCCESS", foreground="green", font=('TkDefaultFont', 9, 'bold'))
 
-        # Klasör seçimi ve sekmeler çerçevesi
-        control_frame = ttk.Frame(self.root, padding="10")
-        control_frame.pack(fill=tk.BOTH, expand=False)
+    def log_status(self, message, level="INFO"):
+        self.log_text.config(state=tk.NORMAL)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n", level)
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+        self.root.update_idletasks()
 
-        # Durum ve bilgi çerçevesi
-        status_frame = ttk.Frame(self.root, padding="10")
-        status_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5) # Durum alanı genişlesin
+    def handle_paste_shortcut(self, event):
+        focused = self.root.focus_get()
+        if str(self.tree1) in str(focused) or str(self.left_frame) in str(focused):
+            self.paste_data(1)
+        elif str(self.tree2) in str(focused) or str(self.right_frame) in str(focused):
+            self.paste_data(2)
 
-        # --- options_frame içeriği ---
-        # Sayfa Yönü
-        orient_frame = ttk.Frame(options_frame)
-        orient_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(orient_frame, text="Sayfa Yönü:").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(orient_frame, text="Yatay (Landscape)", variable=self.page_orientation, value="Landscape").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(orient_frame, text="Dikey (Portrait)", variable=self.page_orientation, value="Portrait").pack(side=tk.LEFT, padx=5)
-
-        # Kenar Boşlukları (Yeni Çerçeve)
-        margin_frame = ttk.LabelFrame(options_frame, text="Kenar Boşlukları (cm)", padding="10")
-        margin_frame.pack(fill=tk.X, pady=5)
-
-        # Grid kullanarak margin inputlarını düzenleme
-        margin_frame.columnconfigure(1, weight=1) # Giriş alanlarının genişlemesini sağla
-        margin_frame.columnconfigure(3, weight=1)
-
-        ttk.Label(margin_frame, text="Sol:").grid(row=0, column=0, sticky=tk.W, padx=2, pady=2)
-        ttk.Entry(margin_frame, textvariable=self.left_margin, width=10).grid(row=0, column=1, sticky=tk.EW, padx=2, pady=2)
-
-        ttk.Label(margin_frame, text="Sağ:").grid(row=0, column=2, sticky=tk.W, padx=2, pady=2)
-        ttk.Entry(margin_frame, textvariable=self.right_margin, width=10).grid(row=0, column=3, sticky=tk.EW, padx=2, pady=2)
-
-        ttk.Label(margin_frame, text="Üst:").grid(row=1, column=0, sticky=tk.W, padx=2, pady=2)
-        ttk.Entry(margin_frame, textvariable=self.top_margin, width=10).grid(row=1, column=1, sticky=tk.EW, padx=2, pady=2)
-
-        ttk.Label(margin_frame, text="Alt:").grid(row=1, column=2, sticky=tk.W, padx=2, pady=2)
-        ttk.Entry(margin_frame, textvariable=self.bottom_margin, width=10).grid(row=1, column=3, sticky=tk.EW, padx=2, pady=2)
-
-
-        # Arka Plan/Filigran
-        bg_frame = ttk.Frame(options_frame)
-        bg_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(bg_frame, text="Arka Plan:").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(bg_frame, text="Yok", variable=self.background_type, value="None", command=self.update_bg_input_state).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(bg_frame, text="Filigran Yazı", variable=self.background_type, value="Watermark Text", command=self.update_bg_input_state).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(bg_frame, text="Resim Dosyası", variable=self.background_type, value="Background Image", command=self.update_bg_input_state).pack(side=tk.LEFT, padx=2)
-        bg_frame.columnconfigure(4, weight=1) # Giriş alanının genişlemesini sağla
-
-        self.bg_entry = ttk.Entry(bg_frame, textvariable=self.background_value, width=30, state=tk.DISABLED)
-        self.bg_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True) # Fill ve expand eklendi
-        self.bg_button = ttk.Button(bg_frame, text="Seç...", command=self.select_bg_image, state=tk.DISABLED)
-        self.bg_button.pack(side=tk.LEFT, padx=5)
-
-        # Sütun Adı Değiştirme
-        rename_frame = ttk.Frame(options_frame)
-        rename_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(rename_frame, text="Sütun Adı Değiştirme:").pack(side=tk.LEFT, padx=5)
-        ttk.Button(rename_frame, text="Düzenle", command=self.edit_renames).pack(side=tk.LEFT, padx=5) # Buton metni kısaltıldı
-        self.rename_label = ttk.Label(rename_frame, text=f"Aktif: {self.column_rename_map}", foreground="blue") # Rengi mavi yap
-        self.rename_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-
-
-        # --- control_frame içeriği ---
-        control_frame.columnconfigure(1, weight=1)
-        ttk.Label(control_frame, text="PDF'lerin Kaydedileceği Klasör:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        ttk.Entry(control_frame, textvariable=self.output_folder, width=50).grid(row=0, column=1, sticky=tk.EW, padx=5, pady=5)
-        ttk.Button(control_frame, text="Gözat...", command=self.select_output_folder).grid(row=0, column=2, padx=5, pady=5)
-
-        # Sekmeler: Dosyadan ve Yapıştırarak
-        notebook = ttk.Notebook(control_frame)
-        notebook.grid(row=1, column=0, columnspan=3, sticky="nsew")
-
-        file_tab = ttk.Frame(notebook)
-        paste_tab = ttk.Frame(notebook)
-        notebook.add(file_tab, text="Dosyadan")
-        notebook.add(paste_tab, text="Yapıştırarak")
-
-        # Dosyadan tab: yalnızca başlat butonu
-        self.run_button = ttk.Button(file_tab, text="Excel Dosyalarını Seç ve Karşılaştırmayı Başlat", command=self.select_files_and_start)
-        self.run_button.pack(padx=5, pady=10, anchor=tk.W)
-
-        # Yapıştırarak tab: iki metin alanı ve buton
-        paste_inner = ttk.Frame(paste_tab)
-        paste_inner.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        paste_inner.columnconfigure(0, weight=1)
-        paste_inner.columnconfigure(1, weight=1)
-        paste_inner.rowconfigure(1, weight=1)
-
-        ttk.Label(paste_inner, text="1. Excel'den Kopyala ve Yapıştır:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(paste_inner, text="2. Excel'den Kopyala ve Yapıştır:").grid(row=0, column=1, sticky=tk.W)
-
-        self.paste_text1 = tk.Text(paste_inner, height=12, wrap=tk.NONE)
-        self.paste_text2 = tk.Text(paste_inner, height=12, wrap=tk.NONE)
-        yscroll1 = ttk.Scrollbar(paste_inner, orient=tk.VERTICAL, command=self.paste_text1.yview)
-        yscroll2 = ttk.Scrollbar(paste_inner, orient=tk.VERTICAL, command=self.paste_text2.yview)
-        self.paste_text1.configure(yscrollcommand=yscroll1.set)
-        self.paste_text2.configure(yscrollcommand=yscroll2.set)
-
-        self.paste_text1.grid(row=1, column=0, sticky="nsew")
-        yscroll1.grid(row=1, column=0, sticky="nse")
-        self.paste_text2.grid(row=1, column=1, sticky="nsew")
-        yscroll2.grid(row=1, column=1, sticky="nse")
-
-        self.run_paste_button = ttk.Button(paste_inner, text="Yapıştırılan Verilerle Karşılaştırmayı Başlat", command=self.start_paste_mode)
-        self.run_paste_button.grid(row=2, column=0, columnspan=2, pady=10, sticky=tk.W)
-
-
-        # --- status_frame içeriği ---
-        # Bilgi etiketleri (Yeni)
-        info_frame = ttk.Frame(status_frame)
-        info_frame.pack(fill=tk.X, expand=False, pady=(0, 5)) # Log alanının üstünde, biraz boşlukla
-
-        self.current_pair_label = ttk.Label(info_frame, text="Mevcut Çift: Bekleniyor...", foreground="gray")
-        self.current_pair_label.pack(side=tk.LEFT, padx=5)
-
-        self.common_rows_label = ttk.Label(info_frame, text="Ortak Kayıt Sayısı: N/A", foreground="gray")
-        self.common_rows_label.pack(side=tk.RIGHT, padx=5)
-
-
-        # Durum Alanı (Log)
-        self.status_text = tk.Text(status_frame, height=10, wrap=tk.WORD, state=tk.DISABLED, bg="#f0f0f0", fg="#333333") # Renk ekle
-        scrollbar = ttk.Scrollbar(status_frame, orient=tk.VERTICAL, command=self.status_text.yview)
-        self.status_text.config(yscrollcommand=scrollbar.set)
-        self.status_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Başlangıçta arka plan giriş alanının durumunu güncelle
-        self.update_bg_input_state()
-        self.is_processing = False
-
-
-    def log_status(self, message):
-        """Durum metin alanına mesaj ekler."""
-        # Tkinter GUI update'lerinin main thread'de yapılması gerekir.
-        # Eğer bu metot farklı bir thread'den çağrılıyorsa, root.after kullanmalıyız.
-        # run_comparison thread'den çağrıldığı için root.after kullanıyoruz.
-        self.root.after(0, self._append_status_text, message)
-
-    def _append_status_text(self, message):
-          """Durum metin alanına güvenli bir şekilde mesaj ekler (main thread)."""
-          self.status_text.config(state=tk.NORMAL)
-          timestamp = datetime.now().strftime("%H:%M:%S")
-          self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
-          self.status_text.see(tk.END)
-          self.status_text.config(state=tk.DISABLED)
-          self.root.update_idletasks() # Hemen güncellenmesini sağla
-
-
-    def update_info_labels(self, pair_text, row_count):
-          """GUI bilgi etiketlerini günceller (main thread)."""
-          self.current_pair_label.config(text=f"Mevcut Çift: {pair_text}", foreground="black" if pair_text != "Bekleniyor..." else "gray")
-          self.common_rows_label.config(text=f"Ortak Kayıt Sayısı: {row_count}", foreground="black" if row_count != "N/A" else "gray")
-
-
-    def select_folder(self, variable):
-        """Klasör seçim diyaloğunu açar."""
-        # initialdir: Eğer kayıtlı klasör varsa onu kullan, yoksa mevcut çalışma dizinini kullan
-        initial_dir = variable.get() if os.path.isdir(variable.get()) else os.getcwd()
-        folder_path = filedialog.askdirectory(initialdir=initial_dir, parent=self.root)
-        if folder_path:
-            variable.set(folder_path)
-
-    # select_input_folder kaldırıldı
-
-    def select_output_folder(self):
-        """PDF'lerin kaydedileceği klasörü belirler."""
-        self.select_folder(self.output_folder)
-
-    def update_bg_input_state(self):
-        """Arka plan türü seçimine göre giriş alanını etkinleştirir/devre dışı bırakır."""
-        bg_type = self.background_type.get()
-        if bg_type == "None":
-            self.bg_entry.config(state=tk.DISABLED)
-            self.bg_button.config(state=tk.DISABLED)
-            self.background_value.set("") # Seçimi sıfırla
-        elif bg_type == "Watermark Text":
-            self.bg_entry.config(state=tk.NORMAL)
-            self.bg_button.config(state=tk.DISABLED)
-            # Eğer önceden resim seçilmişse metin alanını temizleme, kalsın.
-        elif bg_type == "Background Image":
-            self.bg_entry.config(state=tk.NORMAL)
-            self.bg_button.config(state=tk.NORMAL)
-            # Eğer önceden metin girilmişse resim alanını temizleme, kalsın.
-
-
-    def select_bg_image(self):
-        """Arka plan resmi seçmek için dosya diyaloğunu açar."""
-        if self.background_type.get() == "Background Image":
-            # initialdir: Eğer kayıtlı resim yolu varsa onun dizinini kullan, yoksa mevcut çalışma dizinini kullan
-            initial_dir = os.path.dirname(self.background_value.get()) if self.background_value.get() and os.path.exists(os.path.dirname(self.background_value.get())) else os.getcwd()
-            file_path = filedialog.askopenfilename(
-                title="Arka Plan Resmini Seç",
-                initialdir=initial_dir,
-                filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All Files", "*.*")],
-                 parent=self.root # Diyalogun ana pencereye bağlı olmasını sağla
-            )
-            if file_path:
-                self.background_value.set(file_path)
-
-    def edit_renames(self):
-        """Sütun adlarını düzenlemek için basit bir diyalog açar."""
-        # Mevcut yeniden adlandırmaları string formatına getir
-        current_map_str = '; '.join([f"{k}->{v}" for k, v in self.column_rename_map.items()])
-
-        new_map_str = simpledialog.askstring(
-            "Sütun Adı Değiştir",
-            "Sütun adlarını 'EskiAd1->YeniAd1; EskiAd2->YeniAd2' formatında girin:\n"
-            "(Örnek: 'Dosya Durumu->Derdest; Birim Adı->CBS Adı')",
-            initialvalue=current_map_str,
-            parent=self.root # Diyalogun ana pencereye bağlı olmasını sağla
-        )
-
-        if new_map_str is not None: # Eğer kullanıcı İptal'e basmadıysa
-            try:
-                # Kullanıcının girdiği string'i parse et
-                temp_map = {}
-                if new_map_str.strip(): # Eğer boş değilse parse et
-                    pairs = new_map_str.split(';')
-                    for pair in pairs:
-                        if '->' in pair:
-                            old, new = pair.split('->', 1) # Sadece ilk '->'ya göre böl
-                            temp_map[old.strip()] = new.strip()
-                        # else: Tek '->' içermeyenleri yoksay veya hata verilebilir
-
-                # Geçerli yeniden adlandırma haritasını güncelle
-                self.column_rename_map = temp_map
-                self.rename_label.config(text=f"Aktif: {self.column_rename_map}")
-            except Exception as e:
-                messagebox.showerror("Hata", f"Sütun adı değiştirme formatı hatalı. Lütfen 'EskiAd->YeniAd; ...' formatını kullanın.\nHata: {e}")
-                # Hata durumunda haritayı son geçerli haline geri döndürmek istenebilir, ama şimdilik simpledialog'un
-                # işlevselliği yeterli kabul edildi.
-
-    def select_files_and_start(self):
-        """Dosya seçme diyaloğunu açar ve seçilen dosyalarla işlemi başlatır."""
-        if self.is_processing:
-            messagebox.showwarning("Devam Eden İşlem", "Bir işlem zaten devam ediyor. Lütfen bitmesini bekleyin.")
-            return
-        # Dosya seçme diyaloğu için başlangıç dizini olarak mevcut çalışma dizinini kullan
-        initial_dir = os.getcwd()
-
-        # Dosya seçme diyaloğunu aç
-        file_paths = filedialog.askopenfilenames(
-            title="Karşılaştırılacak Excel Dosyalarını Seçin",
-            initialdir=initial_dir,
-            filetypes=[("Excel Files", "*.xlsx")],
-            parent=self.root # Diyalogun ana pencereye bağlı olmasını sağla
-        )
-
-        if not file_paths: # Kullanıcı hiçbir dosya seçmediyse veya iptal ettiyse
-            self.log_status("Dosya seçimi iptal edildi.")
-            return
-
-        # Tuple'ı listeye çevir
-        file_paths_list = list(file_paths)
-
-        if len(file_paths_list) < 2:
-            messagebox.showwarning("Yetersiz Dosya", "Karşılaştırma yapmak için en az iki Excel (.xlsx) dosyası seçmelisiniz.")
-            self.log_status("Uyarı: Karşılaştırma için yetersiz dosya seçildi.")
-            return
-
-        # Kenar boşluklarını al ve doğrula
+    def paste_data(self, tree_num):
         try:
-            margins_cm = {
-                "left": self.left_margin.get(),
-                "right": self.right_margin.get(),
-                "top": self.top_margin.get(),
-                "bottom": self.bottom_margin.get()
-            }
-            # Negatif veya sıfır boşluk kontrolü
-            if any(m < 0 for m in margins_cm.values()):
-                messagebox.showerror("Hata", "Kenar boşlukları negatif olamaz.")
-                self.log_status("Hata: Kenar boşlukları negatif olamaz.")
-                return
-             # Sayfa boyutu kontrolü build_pdf_report fonksiyonuna taşındı
+            clipboard_data = self.root.clipboard_get()
+            if not clipboard_data: return
+            new_df = parse_clipboard_data(clipboard_data, self.log_status)
+            if new_df is None: return
 
-        except tk.TclError:
-            messagebox.showerror("Hata", "Kenar boşluğu değerleri sayı olmalıdır.")
-            self.log_status("Hata: Kenar boşluğu değerleri sayı olmalıdır.")
-            return
-
-        out_folder = self.output_folder.get()
-        if not os.path.isdir(out_folder):
-            try:
-                os.makedirs(out_folder)
-                self.log_status(f"Çıkış klasörü oluşturuldu: {out_folder}")
-            except Exception as e:
-                messagebox.showerror("Hata", f"Çıkış klasörü oluşturulamadı:\n{out_folder}\n{e}")
-                self.log_status(f"Hata: Çıkış klasörü oluşturulamadı: {e}")
-                return
-
-
-        # GUI elementlerini devre dışı bırak
-        self.run_button.config(state=tk.DISABLED, text="İşlem Başlatılıyor...")
-        self.run_paste_button.config(state=tk.DISABLED)
-        self.is_processing = True
-        self.status_text.config(state=tk.NORMAL)
-        self.status_text.delete('1.0', tk.END) # Önceki logları temizle
-        self.status_text.config(state=tk.DISABLED)
-        self.update_info_labels("Hazırlanıyor...", "N/A") # Bilgi etiketlerini sıfırla
-        self.log_status(f"Seçilen {len(file_paths_list)} dosya ile işlem başlatılıyor...")
-
-        bg_info = {
-            "type": self.background_type.get(),
-            "value": self.background_value.get() if self.background_type.get() != "None" else None
-        }
-
-        # Arka plan resmi seçildiyse dosyanın varlığını kontrol et
-        if bg_info["type"] == "Background Image" and bg_info["value"] and not os.path.exists(bg_info["value"]):
-             messagebox.showerror("Hata", f"Arka plan resim dosyası bulunamadı:\n{bg_info['value']}")
-             self.log_status(f"Hata: Arka plan resim dosyası bulunamadı: {bg_info['value']}")
-             self.enable_run_button() # Düğmeyi tekrar etkinleştir
-             return
-
-
-        # İşlemi ayrı bir iş parçacığında başlat
-        thread = threading.Thread(
-            target=self.run_comparison,
-            args=(file_paths_list, out_folder, self.page_orientation.get(), bg_info, self.column_rename_map.copy(), margins_cm),
-            daemon=True # Ana uygulama kapanınca thread de kapansın
-        )
-        thread.start()
-
-
-    def run_comparison(self, file_paths, output_dir, page_orientation, background_info, column_map, margins_cm):
-        """Seçilen dosya çiftlerini karşılaştırır ve PDF oluşturur."""
-        try:
-            # Seçilen dosyalardan tüm çiftleri oluştur
-            pairings = list(combinations(file_paths, 2))
-            self.log_status(f"Toplam {len(pairings)} dosya çifti karşılaştırılacak.")
-
-            success_count = 0
-            fail_count = 0
-            skipped_count = 0 # Ortak kayıt bulunamadığı için atlananlar
-
-            for i, (file1_path, file2_path) in enumerate(pairings):
-                file1_name = os.path.splitext(os.path.basename(file1_path))[0]
-                file2_name = os.path.splitext(os.path.basename(file2_path))[0]
-                pdf_name = f"{file1_name}_vs_{file2_name}_Comparison.pdf"
-                output_pdf_path = os.path.join(output_dir, pdf_name)
-
-                current_pair_text = f"{os.path.basename(file1_path)} vs {os.path.basename(file2_path)} ({i+1}/{len(pairings)})"
-                self.log_status(f"--- Karşılaştırma ({i+1}/{len(pairings)}): {os.path.basename(file1_path)} vs {os.path.basename(file2_path)} ---")
-                self.root.after(0, self.update_info_labels, current_pair_text, "Hesaplanıyor...") # GUI'yi güncelle
-
-                processed_data = process_files(file1_path, file2_path, BASE_COLUMNS, column_map, self.log_status) # log_callback'i pass et
-
-                if processed_data is not None and not processed_data.empty:
-                    common_rows_count = len(processed_data)
-                    self.root.after(0, self.update_info_labels, current_pair_text, common_rows_count) # Ortak kayıt sayısını GUI'ye yaz
-                    self.log_status(f"Ortak kayıt bulundu: {common_rows_count}. PDF oluşturuluyor: {pdf_name}")
-
-                    pdf_success = build_pdf_report(
-                        output_pdf_path,
-                        processed_data,
-                        file1_name,
-                        file2_name,
-                        page_orientation,
-                        background_info,
-                        margins_cm,
-                        self.log_status, # log_callback'i pass et
-                        comparison_columns=BASE_COLUMNS
-                    )
-                    if pdf_success:
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                        # Hata build_pdf_report içinde loglanıyor
-                elif processed_data is None:
-                    # process_files bir hata nedeniyle None döndürdüyse
-                    fail_count += 1
-                    # Hata process_files içinde loglanıyor
-                    self.root.after(0, self.update_info_labels, current_pair_text, "Hata Oluştu") # GUI'yi güncelle
-                else: # processed_data boş DataFrame ise (ortak kayıt bulunamadı veya filtre sonrası boş)
-                    self.log_status(f"Bilgi: {os.path.basename(file1_path)} ve {os.path.basename(file2_path)} arasında ortak kayıt bulunamadı veya geçerli kayıt kalmadı. PDF oluşturulmuyor.")
-                    self.root.after(0, self.update_info_labels, current_pair_text, "0 (Atlandı)") # GUI'yi güncelle
-                    skipped_count += 1
-
-
-            self.log_status("--- İşlem Tamamlandı ---")
-            self.log_status(f"Başarılı Oluşturulan PDF: {success_count}")
-            self.log_status(f"Ortak Kayıt Bulunamayan/Atlanan Çift: {skipped_count}")
-            self.log_status(f"Hata Oluşan Çift: {fail_count}")
-
-
-            final_message = (
-                f"İşlem tamamlandı.\n\n"
-                f"Başarıyla oluşturulan PDF sayısı: {success_count}\n"
-                f"Ortak kayıt bulunamayan/atlanan çift sayısı: {skipped_count}\n"
-                f"Hata oluşan dosya çifti sayısı: {fail_count}"
-            )
-            self.root.after(0, lambda: messagebox.showinfo("İşlem Tamamlandı", final_message))
-
-
-        except Exception as e:
-            self.log_status(f"BEKLENMEDİK KRİTİK HATA OLUŞTU: {e}")
-            self.log_status(traceback.format_exc()) # Hatanın detayını logla
-            self.root.after(0, lambda: messagebox.showerror("Kritik Hata", f"İşlem sırasında beklenmedik bir hata oluştu:\n{e}"))
-        finally:
-            # İşlem bitince düğmeyi tekrar etkinleştir ve GUI'yi temizle
-            self.root.after(0, self.enable_run_button)
-            self.root.after(0, self.update_info_labels, "Bekleniyor...", "N/A") # Bilgi etiketlerini sıfırla
-
-
-    def enable_run_button(self):
-        """Ana iş parçacığından çalıştırma düğmesini güvenli bir şekilde yeniden etkinleştirir."""
-        self.run_button.config(state=tk.NORMAL, text="Excel Dosyalarını Seç ve Karşılaştırmayı Başlat")
-        self.run_paste_button.config(state=tk.NORMAL, text="Yapıştırılan Verilerle Karşılaştırmayı Başlat")
-        self.is_processing = False
-
-    def start_paste_mode(self):
-        """Yapıştırılan iki metni okuyup kesişimi hesaplayan işlemi başlatır."""
-        if self.is_processing:
-            messagebox.showwarning("Devam Eden İşlem", "Bir işlem zaten devam ediyor. Lütfen bitmesini bekleyin.")
-            return
-
-        text1 = self.paste_text1.get('1.0', tk.END)
-        text2 = self.paste_text2.get('1.0', tk.END)
-
-        if not text1.strip() or not text2.strip():
-            messagebox.showwarning("Eksik Veri", "Her iki alana da Excel'den verileri yapıştırın.")
-            return
-
-        # Kenar boşluklarını al ve doğrula
-        try:
-            margins_cm = {
-                "left": self.left_margin.get(),
-                "right": self.right_margin.get(),
-                "top": self.top_margin.get(),
-                "bottom": self.bottom_margin.get(),
-            }
-            if any(m < 0 for m in margins_cm.values()):
-                messagebox.showerror("Hata", "Kenar boşlukları negatif olamaz.")
-                return
-        except tk.TclError:
-            messagebox.showerror("Hata", "Kenar boşluğu değerleri sayı olmalıdır.")
-            return
-
-        out_folder = self.output_folder.get()
-        if not os.path.isdir(out_folder):
-            try:
-                os.makedirs(out_folder, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("Hata", f"Çıkış klasörü oluşturulamadı:\n{out_folder}\n{e}")
-                return
-
-        self.run_button.config(state=tk.DISABLED)
-        self.run_paste_button.config(state=tk.DISABLED, text="İşlem Başlatılıyor...")
-        self.status_text.config(state=tk.NORMAL)
-        self.status_text.delete('1.0', tk.END)
-        self.status_text.config(state=tk.DISABLED)
-        self.update_info_labels("Hazırlanıyor...", "N/A")
-        self.log_status("Yapıştırılan verilerle işlem başlatılıyor...")
-        self.is_processing = True
-
-        bg_info = {
-            "type": self.background_type.get(),
-            "value": self.background_value.get() if self.background_type.get() != "None" else None,
-        }
-
-        thread = threading.Thread(
-            target=self.run_paste_comparison,
-            args=(text1, text2, out_folder, self.page_orientation.get(), bg_info, margins_cm),
-            daemon=True,
-        )
-        thread.start()
-
-    def run_paste_comparison(self, text1: str, text2: str, output_dir: str, page_orientation: str, background_info: dict, margins_cm: dict):
-        """Yapıştırılan metinlerden DataFrame üretir, 'Dosya No' tespit eder ve PDF oluşturur."""
-        try:
-            self.log_status("Yapıştırılan veriler parse ediliyor...")
-            try:
-                df1 = parse_pasted_text_to_dataframe(text1)
-                df2 = parse_pasted_text_to_dataframe(text2)
-            except Exception as e:
-                self.log_status(f"Hata: Yapıştırılan metin parse edilemedi: {e}")
-                self.root.after(0, lambda: messagebox.showerror("Veri Hatası", f"Yapıştırılan veriler okunamadı:\n{e}"))
-                return
-
-            join_col1 = detect_investigation_column(df1.columns)
-            join_col2 = detect_investigation_column(df2.columns)
-            if not join_col1 or not join_col2:
-                self.log_status("Hata: Soruşturma/Dosya numarası sütunu tespit edilemedi.")
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Sütun Bulunamadı",
-                    "Soruşturma/Dosya numarası sütunu tespit edilemedi. Lütfen sütun başlığının 'Dosya No' gibi anlaşılır olduğundan emin olun."
-                ))
-                return
-
-            # Eğer sütun adları farklıysa, ikinci DF'de adını birinciye eşle
-            if join_col2 != join_col1:
-                df2 = df2.rename(columns={join_col2: join_col1})
-                join_col = join_col1
-            else:
-                join_col = join_col1
-
-            self.log_status(f"Birleştirme sütunu: {join_col}")
-
-            # Kesişim DataFrame'i
-            result_df = intersection_by_column(df1, df2, join_col)
-            if result_df.empty:
-                self.root.after(0, self.update_info_labels, "Yapıştırılan Veriler", "0 (Atlandı)")
-                self.log_status("Bilgi: Kesişim bulunamadı. PDF oluşturulmayacak.")
-            else:
-                self.root.after(0, self.update_info_labels, "Yapıştırılan Veriler", len(result_df))
-                self.log_status(f"Ortak kayıt bulundu: {len(result_df)}. PDF oluşturuluyor...")
-
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                pdf_name = f"PastedA_vs_PastedB_{timestamp}.pdf"
-                output_pdf_path = os.path.join(output_dir, pdf_name)
-
-                ok = build_pdf_report(
-                    output_pdf_path,
-                    result_df,
-                    "PastedA",
-                    "PastedB",
-                    page_orientation,
-                    background_info,
-                    margins_cm,
-                    self.log_status,
-                    comparison_columns=[join_col],
-                )
-                if ok:
-                    self.log_status(f"BAŞARILI: PDF oluşturuldu -> {output_pdf_path}")
+            if tree_num == 1:
+                if self.df1 is not None and not self.df1.empty:
+                    self.log_status(f"1. alana {len(new_df)} satır daha ekleniyor...", "INFO")
+                    self.df1 = pd.concat([self.df1, new_df], ignore_index=True)
                 else:
-                    self.log_status("Hata: PDF oluşturulamadı.")
-
-            self.root.after(0, lambda: messagebox.showinfo("İşlem Tamamlandı", "Yapıştırarak karşılaştırma tamamlandı."))
-
+                    self.log_status(f"1. alana veri yapıştırıldı ({len(new_df)} satır).", "INFO")
+                    self.df1 = new_df
+                self.populate_tree(self.tree1, self.df1)
+                self.count_label1.config(text=f"Satır: {len(self.df1)}")
+            else:
+                if self.df2 is not None and not self.df2.empty:
+                    self.log_status(f"2. alana {len(new_df)} satır daha ekleniyor...", "INFO")
+                    self.df2 = pd.concat([self.df2, new_df], ignore_index=True)
+                else:
+                    self.log_status(f"2. alana veri yapıştırıldı ({len(new_df)} satır).", "INFO")
+                    self.df2 = new_df
+                self.populate_tree(self.tree2, self.df2)
+                self.count_label2.config(text=f"Satır: {len(self.df2)}")
         except Exception as e:
-            self.log_status(f"BEKLENMEDİK KRİTİK HATA OLUŞTU (Paste): {e}")
-            self.log_status(traceback.format_exc())
-            self.root.after(0, lambda: messagebox.showerror("Kritik Hata", f"İşlem sırasında beklenmedik bir hata oluştu:\n{e}"))
-        finally:
-            self.root.after(0, self.enable_run_button)
-            self.root.after(0, self.update_info_labels, "Bekleniyor...", "N/A")
+            messagebox.showerror("Hata", f"Yapıştırma hatası: {e}")
+            print(traceback.format_exc())
 
+    def populate_tree(self, tree, df):
+        tree.delete(*tree.get_children())
+        if df is None or df.empty: return
+        display_df_local = df.copy()
+        
+        if self.hide_empty_cols_var.get():
+            def is_col_not_empty(series): return series.astype(str).str.strip().ne('').any()
+            non_empty_cols = [col for col in display_df_local.columns if is_col_not_empty(display_df_local[col])]
+            if non_empty_cols: display_df_local = display_df_local[non_empty_cols]
 
-# --- Ana Çalıştırma ---
+        columns = list(display_df_local.columns)
+        tree['columns'] = columns
+        tree.column('#0', width=0, stretch=tk.NO)
+        for col in columns:
+            tree.heading(col, text=col, anchor=tk.W)
+            width = min(max(100, len(str(col)) * 10), 300)
+            tree.column(col, width=width, anchor=tk.W)
+        for _, row in display_df_local.iterrows():
+            values = [str(val) for val in row]
+            tree.insert('', tk.END, values=values)
+
+    def refresh_all_views(self):
+        if self.df1 is not None: self.populate_tree(self.tree1, self.df1)
+        if self.df2 is not None: self.populate_tree(self.tree2, self.df2)
+        if self.display_df is not None: self.populate_tree(self.result_tree, self.display_df)
+        elif self.result_df is not None: self.populate_tree(self.result_tree, self.result_df)
+
+    def clear_tree(self, tree_num):
+        if tree_num == 1:
+            self.tree1.delete(*self.tree1.get_children())
+            self.tree1['columns'] = []
+            self.df1 = None
+            self.count_label1.config(text="Satır: 0")
+        else:
+            self.tree2.delete(*self.tree2.get_children())
+            self.tree2['columns'] = []
+            self.df2 = None
+            self.count_label2.config(text="Satır: 0")
+
+    def clear_all(self):
+        self.clear_tree(1)
+        self.clear_tree(2)
+        self.result_tree.delete(*self.result_tree.get_children())
+        self.result_df = None
+        self.display_df = None
+        self.current_selected_columns = None
+        self.stats_label.config(text="Temizlendi.")
+        self.btn_customize.config(state=tk.DISABLED)
+        self.btn_pdf.config(state=tk.DISABLED)
+
+    def compare_data(self):
+        if self.df1 is None or self.df2 is None:
+            messagebox.showwarning("Eksik Veri", "Her iki alana da veri yapıştırmalısınız.")
+            return
+        result = process_comparison(self.df1.copy(), self.df2.copy(), BASE_COLUMNS, self.log_status)
+        if result is not None and not result.empty:
+            self.result_df = result
+            self.display_df = result
+            self.current_selected_columns = list(result.columns)
+            self.populate_tree(self.result_tree, result)
+            msg = f"Toplam {len(result)} ortak kayıt bulundu."
+            self.stats_label.config(text=msg, foreground='green', font=('Arial', 9, 'bold'))
+            self.btn_customize.config(state=tk.NORMAL)
+            self.btn_pdf.config(state=tk.NORMAL)
+            messagebox.showinfo("Başarılı", msg)
+        else:
+            self.result_df = None
+            self.display_df = None
+            self.result_tree.delete(*self.result_tree.get_children())
+            self.stats_label.config(text="Ortak kayıt bulunamadı.", foreground='red')
+            self.btn_customize.config(state=tk.DISABLED)
+            self.btn_pdf.config(state=tk.DISABLED)
+            messagebox.showinfo("Sonuç", "Ortak kayıt bulunamadı.")
+
+    def open_column_selector(self):
+        if self.result_df is None: return
+        all_columns = list(self.result_df.columns)
+        initial_selection = self.current_selected_columns if self.current_selected_columns is not None else all_columns
+        if self.hide_empty_cols_var.get():
+            def is_col_not_empty(series): return series.astype(str).str.strip().ne('').any()
+            non_empty_cols = [col for col in all_columns if is_col_not_empty(self.result_df[col])]
+            initial_selection = [col for col in initial_selection if col in non_empty_cols]
+        ColumnSelectorDialog(self.root, all_columns, initial_selection, self.apply_custom_view)
+
+    def apply_custom_view(self, selected_columns):
+        if self.result_df is None: return
+        try:
+            self.current_selected_columns = selected_columns
+            self.display_df = self.result_df[selected_columns].copy()
+            self.populate_tree(self.result_tree, self.display_df)
+            self.log_status(f"Görünüm özelleştirildi: {len(selected_columns)} sütun gösteriliyor.", "INFO")
+        except Exception as e:
+            self.log_status(f"Görünüm güncellenirken hata: {e}", "ERROR")
+
+    def copy_result_to_clipboard(self):
+        df_to_copy = self.display_df if self.display_df is not None else self.result_df
+        if df_to_copy is not None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(df_to_copy.to_csv(sep='\t', index=False))
+            self.root.update()
+            messagebox.showinfo("Kopyalandı", "Görüntülenen sonuçlar panoya kopyalandı.")
+        else:
+            messagebox.showwarning("Uyarı", "Kopyalanacak sonuç yok.")
+
+    def open_pdf_editor(self):
+        df_to_export = self.display_df if self.display_df is not None else self.result_df
+        if df_to_export is None or df_to_export.empty:
+            messagebox.showwarning("Uyarı", "PDF'e aktarılacak veri yok.")
+            return
+        PDFLayoutEditor(self.root, df_to_export, None)
+
 if __name__ == "__main__":
+    if not os.path.exists("DejaVuSans.ttf"):
+        print("UYARI: 'DejaVuSans.ttf' dosyası bulunamadı. Türkçe karakterler PDF'te görünmeyebilir.")
     root = tk.Tk()
-    app = ComparisonApp(root)
+    app = PasteComparisonApp(root)
     root.mainloop()
